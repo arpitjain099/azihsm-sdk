@@ -157,7 +157,8 @@ impl Rng {
     /// * `Ok(Vec<u8>)` - A vector filled with random bytes
     /// * `Err(CryptoError::RngError)` - If random number generation fails
     pub fn rand_vec(len: usize) -> Result<Vec<u8>, CryptoError> {
-        let mut buf = vec![0u8; len];
+        let mut buf = Vec::with_capacity(len);
+        buf.resize(len, 0);
         Self::rand_bytes(&mut buf)?;
         Ok(buf)
     }
