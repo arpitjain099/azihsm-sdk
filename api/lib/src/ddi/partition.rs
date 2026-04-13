@@ -327,7 +327,22 @@ pub(crate) fn init_part_raw_no_res(
         HsmOwnerBackupKeySource::Caller => {
             // Caller provided the OBK
             let obk = obk_config.key().ok_or(HsmError::InvalidArgument)?;
-            init_bk3(dev, rev, obk)?
+            match init_bk3(dev, rev, obk) {
+                Ok(masked_obk) => {
+                    // First-time init succeeded — seal the masked BK3 for future use
+                    set_sealed_bk3(dev, rev, &masked_obk)?;
+                    masked_obk
+                }
+                Err(e) => {
+                    // BK3 already initialized — retrieve the previously sealed value
+                    tracing::warn!(
+                        "init_bk3 failed with error {:?}, attempting to retrieve existing sealed BK3",
+                        e
+                    );
+                    let masked_obk = get_sealed_bk3(dev, rev)?;
+                    masked_obk
+                }
+            }
         }
         HsmOwnerBackupKeySource::Tpm => {
             // Retrieve sealed BK3 from device and unseal with TPM
@@ -732,4 +747,35 @@ fn get_sealed_bk3(dev: &HsmDev, rev: HsmApiRev) -> HsmResult<Vec<u8>> {
     let resp = dev.exec_op(&req, &mut None).map_err(HsmError::from)?;
 
     Ok(resp.data.sealed_bk3.as_slice().to_vec())
+}
+
+/// Persists the masked BK3 on the device as a sealed blob.
+///
+/// After a successful `init_bk3`, the masked BK3 must be stored on the device
+/// via `SetSealedBk3` so that subsequent boots can retrieve it with
+/// `GetSealedBk3` instead of re-initializing.
+///
+/// # Arguments
+///
+/// * `dev` - The HSM device handle
+/// * `rev` - The API revision to use
+/// * `sealed_bk3` - The masked BK3 data to persist
+///
+/// # Errors
+///
+/// Returns an error if the operation fails.
+fn set_sealed_bk3(dev: &HsmDev, rev: HsmApiRev, sealed_bk3: &[u8]) -> HsmResult<()> {
+    let req = DdiSetSealedBk3CmdReq {
+        hdr: build_ddi_req_hdr(DdiOp::SetSealedBk3, Some(rev), None),
+        data: DdiSetSealedBk3Req {
+            sealed_bk3: MborByteArray::from_slice(sealed_bk3)
+                .map_hsm_err(HsmError::InvalidArgument)?,
+        },
+        ext: None,
+    };
+
+    dev.exec_op(&req, &mut None)
+        .map_hsm_err(HsmError::DdiCmdFailure)?;
+
+    Ok(())
 }
