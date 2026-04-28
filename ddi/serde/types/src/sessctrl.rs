@@ -54,7 +54,8 @@ impl From<DdiOp> for SessionControlKind {
             | DdiOp::GetSessionEncryptionKey
             | DdiOp::InitBk3
             | DdiOp::GetSealedBk3
-            | DdiOp::SetSealedBk3 => SessionControlKind::NoSession,
+            | DdiOp::SetSealedBk3
+            | DdiOp::ShaDigest => SessionControlKind::NoSession,
 
             DdiOp::OpenSession => SessionControlKind::Open,
 
