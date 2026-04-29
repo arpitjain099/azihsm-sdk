@@ -31,6 +31,7 @@ mod integration {
     pub mod get_cert_chain;
     pub mod get_device_info;
     pub mod get_establish_cred_encryption_key;
+    pub mod get_session_enc_key_smoke;
     pub mod get_session_encryption_key;
     pub mod get_unwrapping_key;
     pub mod hmac;
