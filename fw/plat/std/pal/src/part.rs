@@ -70,6 +70,11 @@ const P384_COORD_SIZE: usize = 48;
 /// Size of the raw public key (x ∥ y) in bytes.
 pub(crate) const P384_PUB_KEY_LEN: usize = P384_COORD_SIZE * 2;
 
+/// Maximum size of a sealed-BK3 blob in bytes (matches the sim's
+/// `SEALED_BK3_SIZE` and the host SDK's `MborByteArray<1024>` upper
+/// bound; we adopt the smaller mcr-hsm/sim limit).
+pub(crate) const SEALED_BK3_SIZE: usize = 512;
+
 /// A single partition's state and cryptographic material.
 ///
 /// Each partition entry holds all per-partition data in fixed-size
@@ -143,6 +148,18 @@ pub(crate) struct PartitionEntry {
 
     /// 32-byte random nonce, generated on enable and refreshable.
     pub(crate) nonce: [u8; NONCE_LEN],
+
+    /// Sealed BK3 blob (provisioned by `SetSealedBk3`, read by
+    /// `GetSealedBk3`).  The blob is opaque to the firmware — the host
+    /// is free to seal whatever it wants, up to [`SEALED_BK3_SIZE`]
+    /// bytes.  Persists across `disable`/`enable`; cleared on
+    /// `part_free`.
+    pub(crate) sealed_bk3: [u8; SEALED_BK3_SIZE],
+
+    /// Length of valid data in [`sealed_bk3`](Self::sealed_bk3).
+    /// `0` means "not yet set"; a `SetSealedBk3` then succeeds, and
+    /// subsequent attempts return [`HsmError::SealedBk3AlreadySet`].
+    pub(crate) sealed_bk3_len: u32,
 }
 
 impl Default for PartitionEntry {
@@ -162,6 +179,8 @@ impl Default for PartitionEntry {
             session_enc_key_id: None,
             session_enc_pub_key: [0u8; P384_PUB_KEY_LEN],
             nonce: [0u8; NONCE_LEN],
+            sealed_bk3: [0u8; SEALED_BK3_SIZE],
+            sealed_bk3_len: 0,
         }
     }
 }
@@ -340,6 +359,34 @@ impl HsmPartitionManager for StdHsmPal {
     fn part_nonce_refresh(&self, pid: HsmPartId) -> HsmResult<()> {
         let entry = self.enabled_part_mut(u8::from(pid))?;
         Rng::rand_bytes(&mut entry.nonce).map_err(|_| HsmError::InternalError)
+    }
+
+    fn part_sealed_bk3(&self, pid: HsmPartId, out: Option<&mut [u8]>) -> HsmResult<usize> {
+        let entry = self.active_part(pid)?;
+        if entry.sealed_bk3_len == 0 {
+            return Err(HsmError::SealedBk3NotPresent);
+        }
+        let len = entry.sealed_bk3_len as usize;
+        if let Some(buf) = out {
+            if buf.len() < len {
+                return Err(HsmError::InvalidArg);
+            }
+            buf[..len].copy_from_slice(&entry.sealed_bk3[..len]);
+        }
+        Ok(len)
+    }
+
+    fn part_set_sealed_bk3(&self, pid: HsmPartId, data: &[u8]) -> HsmResult<()> {
+        if data.len() > SEALED_BK3_SIZE {
+            return Err(HsmError::SealedBk3TooLarge);
+        }
+        let entry = self.active_part_mut(pid)?;
+        if entry.sealed_bk3_len != 0 {
+            return Err(HsmError::SealedBk3AlreadySet);
+        }
+        entry.sealed_bk3[..data.len()].copy_from_slice(data);
+        entry.sealed_bk3_len = data.len() as u32;
+        Ok(())
     }
 }
 
@@ -610,6 +657,11 @@ impl StdHsmPal {
         entry.id_pub_key.fill(0);
         entry.leaf_cert[..entry.leaf_cert_len].fill(0);
         entry.leaf_cert_len = 0;
+
+        // Zeroize sealed BK3 (preserved across enable/disable, but not
+        // across full free).
+        entry.sealed_bk3.fill(0);
+        entry.sealed_bk3_len = 0;
 
         // Release resources.
         table.global_res_mask &= !entry.res_mask;

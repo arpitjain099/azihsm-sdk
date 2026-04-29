@@ -1290,3 +1290,227 @@ async fn get_establish_cred_encryption_key_changes_after_reenable() {
     // Cleanup
     HSM.part_free(pid).await.expect("free pid 15");
 }
+
+// ---------------------------------------------------------------------------
+// SetSealedBk3 / GetSealedBk3 tests
+// ---------------------------------------------------------------------------
+
+/// Helper: encode and submit a `SetSealedBk3` request, returning `(CQE,
+/// response bytes)`.
+async fn submit_set_sealed_bk3(pid: u8, cmd_id: u16, blob: &[u8]) -> ([u32; 4], Vec<u8>) {
+    use azihsm_ddi_mbor::MborByteArray;
+    use azihsm_ddi_types::*;
+
+    let mut src = AlignedBuf::new(4096);
+    let mut dst = AlignedBuf::new(4096);
+
+    let req_hdr = DdiReqHdr {
+        rev: Some(DdiApiRev { major: 1, minor: 0 }),
+        op: DdiOp::SetSealedBk3,
+        sess_id: None,
+    };
+    let req_data = DdiSetSealedBk3Req {
+        sealed_bk3: MborByteArray::from_slice(blob).expect("blob fits in MborByteArray<1024>"),
+    };
+    let req_len =
+        DdiEncoder::encode_parts(req_hdr, req_data, src.as_mut_slice(), false).expect("encode req");
+
+    let c = HSM
+        .io(
+            sqe_with_dma(cmd_id, &src.as_slice()[..req_len], dst.as_mut_slice()),
+            pid,
+            0,
+            0,
+        )
+        .await
+        .expect("io");
+
+    let resp_len = (c[0] & 0xFFFF) as usize;
+    let resp_bytes = dst.as_slice()[..resp_len].to_vec();
+    (c, resp_bytes)
+}
+
+/// Helper: encode and submit a `GetSealedBk3` request, returning `(CQE,
+/// response bytes)`.
+async fn submit_get_sealed_bk3(pid: u8, cmd_id: u16) -> ([u32; 4], Vec<u8>) {
+    use azihsm_ddi_types::*;
+
+    let mut src = AlignedBuf::new(4096);
+    let mut dst = AlignedBuf::new(4096);
+
+    let req_hdr = DdiReqHdr {
+        rev: Some(DdiApiRev { major: 1, minor: 0 }),
+        op: DdiOp::GetSealedBk3,
+        sess_id: None,
+    };
+    let req_len =
+        DdiEncoder::encode_parts(req_hdr, DdiGetSealedBk3Req {}, src.as_mut_slice(), false)
+            .expect("encode req");
+
+    let c = HSM
+        .io(
+            sqe_with_dma(cmd_id, &src.as_slice()[..req_len], dst.as_mut_slice()),
+            pid,
+            0,
+            0,
+        )
+        .await
+        .expect("io");
+
+    let resp_len = (c[0] & 0xFFFF) as usize;
+    let resp_bytes = dst.as_slice()[..resp_len].to_vec();
+    (c, resp_bytes)
+}
+
+#[tokio::test]
+async fn sealed_bk3_round_trip() {
+    use azihsm_ddi_types::*;
+
+    let pid: u8 = 16;
+    HSM.part_alloc(pid, 1u128 << pid).await.expect("alloc");
+    HSM.part_enable(pid).await.expect("enable");
+
+    let blob: Vec<u8> = (0..73u8).collect();
+
+    // Set
+    let (c, resp_bytes) = submit_set_sealed_bk3(pid, 1300, &blob).await;
+    assert_eq!(cqe_status(&c), 0, "set: expected Success");
+    let mut dec = DdiDecoder::new(&resp_bytes, false);
+    let hdr: DdiRespHdr = dec.decode_hdr().expect("set hdr");
+    assert_eq!(hdr.op, DdiOp::SetSealedBk3);
+    assert_eq!(hdr.status, DdiStatus::Success);
+
+    // Get — should return the same bytes
+    let (c, resp_bytes) = submit_get_sealed_bk3(pid, 1301).await;
+    assert_eq!(cqe_status(&c), 0, "get: expected Success");
+    let mut dec = DdiDecoder::new(&resp_bytes, false);
+    let hdr: DdiRespHdr = dec.decode_hdr().expect("get hdr");
+    assert_eq!(hdr.op, DdiOp::GetSealedBk3);
+    assert_eq!(hdr.status, DdiStatus::Success);
+    let data: DdiGetSealedBk3Resp = dec.decode_data().expect("get data");
+    assert_eq!(data.sealed_bk3.as_slice(), blob.as_slice());
+
+    HSM.part_free(pid).await.expect("free");
+}
+
+#[tokio::test]
+async fn sealed_bk3_set_twice_rejected() {
+    use azihsm_ddi_types::*;
+
+    let pid: u8 = 17;
+    HSM.part_alloc(pid, 1u128 << pid).await.expect("alloc");
+    HSM.part_enable(pid).await.expect("enable");
+
+    let blob = b"first attempt".to_vec();
+    let (c, resp_bytes) = submit_set_sealed_bk3(pid, 1310, &blob).await;
+    assert_eq!(cqe_status(&c), 0, "first set: expected Success");
+    let mut dec = DdiDecoder::new(&resp_bytes, false);
+    let hdr: DdiRespHdr = dec.decode_hdr().expect("hdr");
+    assert_eq!(hdr.status, DdiStatus::Success);
+
+    // Second set — should be rejected with SealedBk3AlreadySet
+    let (c, resp_bytes) = submit_set_sealed_bk3(pid, 1311, &blob).await;
+    assert_eq!(cqe_status(&c), 0, "post-decode error rides as CQE Success");
+    let mut dec = DdiDecoder::new(&resp_bytes, false);
+    let hdr: DdiRespHdr = dec.decode_hdr().expect("hdr");
+    assert_eq!(hdr.op, DdiOp::SetSealedBk3);
+    assert_eq!(hdr.status, DdiStatus::SealedBk3AlreadySet);
+
+    HSM.part_free(pid).await.expect("free");
+}
+
+#[tokio::test]
+async fn sealed_bk3_set_too_large_rejected() {
+    use azihsm_ddi_types::*;
+
+    let pid: u8 = 18;
+    HSM.part_alloc(pid, 1u128 << pid).await.expect("alloc");
+    HSM.part_enable(pid).await.expect("enable");
+
+    // 513 bytes — exceeds the 512-byte storage limit.
+    let blob = vec![0xAB_u8; 513];
+    let (c, resp_bytes) = submit_set_sealed_bk3(pid, 1320, &blob).await;
+    assert_eq!(cqe_status(&c), 0, "post-decode error rides as CQE Success");
+    let mut dec = DdiDecoder::new(&resp_bytes, false);
+    let hdr: DdiRespHdr = dec.decode_hdr().expect("hdr");
+    assert_eq!(hdr.op, DdiOp::SetSealedBk3);
+    assert_eq!(hdr.status, DdiStatus::SealedBk3TooLarge);
+
+    HSM.part_free(pid).await.expect("free");
+}
+
+#[tokio::test]
+async fn sealed_bk3_get_before_set_rejected() {
+    use azihsm_ddi_types::*;
+
+    let pid: u8 = 19;
+    HSM.part_alloc(pid, 1u128 << pid).await.expect("alloc");
+    HSM.part_enable(pid).await.expect("enable");
+
+    let (c, resp_bytes) = submit_get_sealed_bk3(pid, 1330).await;
+    assert_eq!(cqe_status(&c), 0, "post-decode error rides as CQE Success");
+    let mut dec = DdiDecoder::new(&resp_bytes, false);
+    let hdr: DdiRespHdr = dec.decode_hdr().expect("hdr");
+    assert_eq!(hdr.op, DdiOp::GetSealedBk3);
+    assert_eq!(hdr.status, DdiStatus::SealedBk3NotPresent);
+
+    HSM.part_free(pid).await.expect("free");
+}
+
+#[tokio::test]
+async fn sealed_bk3_persists_across_disable_enable() {
+    use azihsm_ddi_types::*;
+
+    let pid: u8 = 20;
+    HSM.part_alloc(pid, 1u128 << pid).await.expect("alloc");
+    HSM.part_enable(pid).await.expect("enable");
+
+    let blob = b"sticky bk3".to_vec();
+    let (c, _) = submit_set_sealed_bk3(pid, 1340, &blob).await;
+    assert_eq!(cqe_status(&c), 0);
+
+    // Bounce the partition; sealed_bk3 must survive (mcr-hsm semantics:
+    // sealed_bk3 is part of FunctionState that survives reset).
+    HSM.part_disable(pid).await.expect("disable");
+    HSM.part_enable(pid).await.expect("re-enable");
+
+    let (c, resp_bytes) = submit_get_sealed_bk3(pid, 1341).await;
+    assert_eq!(cqe_status(&c), 0);
+    let mut dec = DdiDecoder::new(&resp_bytes, false);
+    let _: DdiRespHdr = dec.decode_hdr().expect("hdr");
+    let data: DdiGetSealedBk3Resp = dec.decode_data().expect("data");
+    assert_eq!(data.sealed_bk3.as_slice(), blob.as_slice());
+
+    HSM.part_free(pid).await.expect("free");
+}
+
+#[tokio::test]
+async fn sealed_bk3_cleared_on_part_free() {
+    use azihsm_ddi_types::*;
+
+    let pid: u8 = 21;
+    HSM.part_alloc(pid, 1u128 << pid).await.expect("alloc");
+    HSM.part_enable(pid).await.expect("enable");
+
+    let blob = b"to be wiped".to_vec();
+    let (c, _) = submit_set_sealed_bk3(pid, 1350, &blob).await;
+    assert_eq!(cqe_status(&c), 0);
+
+    // Free + re-alloc + re-enable. New partition lifecycle should start
+    // with no sealed_bk3.
+    HSM.part_free(pid).await.expect("free");
+    HSM.part_alloc(pid, 1u128 << pid).await.expect("re-alloc");
+    HSM.part_enable(pid).await.expect("re-enable");
+
+    let (c, resp_bytes) = submit_get_sealed_bk3(pid, 1351).await;
+    assert_eq!(cqe_status(&c), 0);
+    let mut dec = DdiDecoder::new(&resp_bytes, false);
+    let hdr: DdiRespHdr = dec.decode_hdr().expect("hdr");
+    assert_eq!(
+        hdr.status,
+        DdiStatus::SealedBk3NotPresent,
+        "sealed_bk3 must be cleared on part_free",
+    );
+
+    HSM.part_free(pid).await.expect("free");
+}

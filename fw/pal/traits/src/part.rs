@@ -134,4 +134,35 @@ pub trait HsmPartitionManager {
     /// Called after credential establishment or session open to ensure
     /// nonce freshness.
     fn part_nonce_refresh(&self, pid: HsmPartId) -> HsmResult<()>;
+
+    /// Read the sealed-BK3 blob previously written via
+    /// [`part_set_sealed_bk3`](Self::part_set_sealed_bk3).
+    ///
+    /// Pass `None` to query the size; pass `Some(buf)` to copy into
+    /// `buf` and return the number of bytes written.
+    ///
+    /// The blob is opaque to the firmware — the host owns its
+    /// interpretation. Persists across `disable`/`enable`; cleared by
+    /// `part_free`.
+    ///
+    /// # Errors
+    /// - [`HsmError::SealedBk3NotPresent`] — the blob has not yet been set.
+    /// - [`HsmError::InvalidArg`] — `pid` is out of range, the
+    ///   partition is not allocated, or `out` is `Some(buf)` and `buf`
+    ///   is too small.
+    fn part_sealed_bk3(&self, pid: HsmPartId, out: Option<&mut [u8]>) -> HsmResult<usize>;
+
+    /// Store a sealed-BK3 blob into per-partition storage.
+    ///
+    /// Single-shot: subsequent calls fail with
+    /// [`HsmError::SealedBk3AlreadySet`] until the partition is freed
+    /// and re-allocated.
+    ///
+    /// # Errors
+    /// - [`HsmError::SealedBk3TooLarge`] — `data.len()` exceeds the
+    ///   per-partition storage size.
+    /// - [`HsmError::SealedBk3AlreadySet`] — the blob has already been set.
+    /// - [`HsmError::InvalidArg`] — `pid` is out of range or the
+    ///   partition is not allocated.
+    fn part_set_sealed_bk3(&self, pid: HsmPartId, data: &[u8]) -> HsmResult<()>;
 }

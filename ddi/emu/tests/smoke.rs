@@ -19,11 +19,16 @@ use azihsm_ddi_types::DdiGetApiRevCmdReq;
 use azihsm_ddi_types::DdiGetApiRevReq;
 use azihsm_ddi_types::DdiGetEstablishCredEncryptionKeyCmdReq;
 use azihsm_ddi_types::DdiGetEstablishCredEncryptionKeyReq;
+use azihsm_ddi_types::DdiGetSealedBk3CmdReq;
+use azihsm_ddi_types::DdiGetSealedBk3Req;
 use azihsm_ddi_types::DdiHashAlgorithm;
 use azihsm_ddi_types::DdiOp;
 use azihsm_ddi_types::DdiReqHdr;
+use azihsm_ddi_types::DdiSetSealedBk3CmdReq;
+use azihsm_ddi_types::DdiSetSealedBk3Req;
 use azihsm_ddi_types::DdiShaDigestCmdReq;
 use azihsm_ddi_types::DdiShaDigestReq;
+use azihsm_ddi_types::DdiStatus;
 
 #[test]
 fn dev_info_list_returns_emu_device() {
@@ -162,4 +167,66 @@ fn get_establish_cred_encryption_key_round_trips_through_emulator() {
     // is the line that previously panicked with `EccKeyImportError`.
     let _key = DeviceCredKey::new(&resp.data.pub_key, resp.data.nonce)
         .expect("DeviceCredKey::new must accept the DER-converted public key");
+}
+
+/// Round-trip [`DdiOp::SetSealedBk3`] + [`DdiOp::GetSealedBk3`] through
+/// the emulator. Set first, then get, then assert the bytes match.
+/// Also asserts that a second `Set` returns `SealedBk3AlreadySet`,
+/// and a `Get` after `Set` succeeds (vs. fresh-process baseline where
+/// `Get` would return `SealedBk3NotPresent`).
+///
+/// Each test runs in its own nextest process, so the partition state
+/// is fresh.
+#[test]
+fn sealed_bk3_set_get_round_trips_through_emulator() {
+    let ddi = DdiEmu::default();
+    let mut dev = ddi.open_dev(EMU_DEVICE_PATH).expect("open emu device");
+    dev.set_device_kind(DdiDeviceKind::Physical);
+
+    let blob: Vec<u8> = (10..73u8).collect();
+    let mut cookie = None;
+
+    // SetSealedBk3 — must succeed.
+    let set_req = DdiSetSealedBk3CmdReq {
+        hdr: DdiReqHdr {
+            rev: Some(DdiApiRev { major: 1, minor: 0 }),
+            op: DdiOp::SetSealedBk3,
+            sess_id: None,
+        },
+        data: DdiSetSealedBk3Req {
+            sealed_bk3: MborByteArray::from_slice(&blob).expect("blob fits"),
+        },
+        ext: None,
+    };
+    let set_resp = dev
+        .exec_op(&set_req, &mut cookie)
+        .expect("SetSealedBk3 should succeed");
+    assert_eq!(set_resp.hdr.op, DdiOp::SetSealedBk3);
+    assert_eq!(set_resp.hdr.status, DdiStatus::Success);
+
+    // GetSealedBk3 — must return the same bytes.
+    let get_req = DdiGetSealedBk3CmdReq {
+        hdr: DdiReqHdr {
+            rev: Some(DdiApiRev { major: 1, minor: 0 }),
+            op: DdiOp::GetSealedBk3,
+            sess_id: None,
+        },
+        data: DdiGetSealedBk3Req {},
+        ext: None,
+    };
+    let get_resp = dev
+        .exec_op(&get_req, &mut cookie)
+        .expect("GetSealedBk3 should succeed after Set");
+    assert_eq!(get_resp.hdr.op, DdiOp::GetSealedBk3);
+    assert_eq!(get_resp.data.sealed_bk3.as_slice(), blob.as_slice());
+
+    // A second SetSealedBk3 must be rejected.
+    let err = dev
+        .exec_op(&set_req, &mut cookie)
+        .expect_err("second SetSealedBk3 must fail");
+    use azihsm_ddi_interface::DdiError;
+    match err {
+        DdiError::DdiStatus(DdiStatus::SealedBk3AlreadySet) => {}
+        other => panic!("expected SealedBk3AlreadySet, got {:?}", other),
+    }
 }
