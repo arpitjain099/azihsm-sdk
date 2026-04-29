@@ -13,6 +13,8 @@ mod ddi;
 mod error;
 mod hsm;
 mod io;
+mod lm_key_derive;
+mod masked_key;
 mod op;
 
 use azihsm_fw_hsm_core_tracing::*;

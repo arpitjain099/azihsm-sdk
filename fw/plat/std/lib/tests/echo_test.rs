@@ -1514,3 +1514,195 @@ async fn sealed_bk3_cleared_on_part_free() {
 
     HSM.part_free(pid).await.expect("free");
 }
+
+// ---------------------------------------------------------------------------
+// InitBk3 tests
+// ---------------------------------------------------------------------------
+
+/// Helper: encode and submit an `InitBk3` request, returning `(CQE,
+/// response bytes)`.
+async fn submit_init_bk3(pid: u8, cmd_id: u16, bk3: &[u8]) -> ([u32; 4], Vec<u8>) {
+    use azihsm_ddi_mbor::MborByteArray;
+    use azihsm_ddi_types::*;
+
+    let mut src = AlignedBuf::new(4096);
+    let mut dst = AlignedBuf::new(4096);
+
+    let req_hdr = DdiReqHdr {
+        rev: Some(DdiApiRev { major: 1, minor: 0 }),
+        op: DdiOp::InitBk3,
+        sess_id: None,
+    };
+    let req_data = DdiInitBk3Req {
+        bk3: MborByteArray::from_slice(bk3).expect("BK3 fits"),
+    };
+    let req_len =
+        DdiEncoder::encode_parts(req_hdr, req_data, src.as_mut_slice(), false).expect("encode req");
+
+    let c = HSM
+        .io(
+            sqe_with_dma(cmd_id, &src.as_slice()[..req_len], dst.as_mut_slice()),
+            pid,
+            0,
+            0,
+        )
+        .await
+        .expect("io");
+
+    let resp_len = (c[0] & 0xFFFF) as usize;
+    let resp_bytes = dst.as_slice()[..resp_len].to_vec();
+    (c, resp_bytes)
+}
+
+#[tokio::test]
+async fn init_bk3_round_trip_decodes_via_host_sdk() {
+    use azihsm_ddi_types::*;
+
+    let pid: u8 = 30;
+    HSM.part_alloc(pid, 1u128 << pid).await.expect("alloc");
+    HSM.part_enable(pid).await.expect("enable");
+
+    let bk3: Vec<u8> = (0..48u8).collect();
+    let (c, resp_bytes) = submit_init_bk3(pid, 1400, &bk3).await;
+    assert_eq!(cqe_status(&c), 0, "expected Success");
+
+    // Decode response header + body.
+    let mut dec = DdiDecoder::new(&resp_bytes, false);
+    let hdr: DdiRespHdr = dec.decode_hdr().expect("hdr");
+    assert_eq!(hdr.op, DdiOp::InitBk3);
+    assert_eq!(hdr.status, DdiStatus::Success);
+
+    let resp: DdiInitBk3Resp = dec.decode_data().expect("data");
+    assert_eq!(resp.vm_launch_guid, [0u8; 16]);
+
+    // The masked_bk3 must be a well-formed MaskedKey envelope. Parse
+    // the wire-format prefix by hand:
+    //   bytes  0..2  : version (u16 LE) = 1
+    //   bytes  2..4  : algorithm (u16 LE) = 1 (AesCbc256Hmac384)
+    //   bytes  4..6  : iv_len (u16 LE) = 16
+    //   bytes  6..8  : post_iv_pad_len (u16 LE) = 0
+    //   bytes  8..10 : metadata_len (u16 LE)
+    //   bytes 10..12 : post_metadata_pad_len (u16 LE)
+    //   bytes 12..14 : encrypted_key_len (u16 LE) = 48
+    //   bytes 14..16 : post_encrypted_key_pad_len (u16 LE) = 0
+    //   bytes 16..18 : tag_len (u16 LE) = 48
+    let masked = resp.masked_bk3.as_slice();
+    let read_u16 = |off: usize| u16::from_le_bytes([masked[off], masked[off + 1]]);
+    assert_eq!(read_u16(0), 1, "wire-format version");
+    assert_eq!(read_u16(2), 1, "algorithm = AesCbc256Hmac384");
+    assert_eq!(read_u16(4), 16, "iv_len");
+    assert_eq!(read_u16(6), 0, "post_iv_pad_len");
+    assert_eq!(read_u16(12), 48, "encrypted_key_len");
+    assert_eq!(read_u16(14), 0, "post_encrypted_key_pad_len");
+    assert_eq!(read_u16(16), 48, "tag_len");
+
+    let metadata_len = read_u16(8) as usize;
+    let post_md_pad = read_u16(10) as usize;
+    let expected_total = 4 + 50 + 16 + metadata_len + post_md_pad + 48 + 48;
+    assert_eq!(masked.len(), expected_total, "envelope total length");
+
+    HSM.part_free(pid).await.expect("free");
+}
+
+#[tokio::test]
+async fn init_bk3_rejects_second_call_for_same_partition() {
+    use azihsm_ddi_types::*;
+
+    let pid: u8 = 31;
+    HSM.part_alloc(pid, 1u128 << pid).await.expect("alloc");
+    HSM.part_enable(pid).await.expect("enable");
+
+    let bk3 = [0xAB_u8; 48];
+
+    // First call must succeed.
+    let (c, _) = submit_init_bk3(pid, 1410, &bk3).await;
+    assert_eq!(cqe_status(&c), 0, "first InitBk3");
+
+    // Second call must be rejected with Bk3AlreadyInitialized.
+    let (c, resp_bytes) = submit_init_bk3(pid, 1411, &bk3).await;
+    assert_eq!(cqe_status(&c), 0, "post-decode error rides as CQE Success");
+    let mut dec = DdiDecoder::new(&resp_bytes, false);
+    let hdr: DdiRespHdr = dec.decode_hdr().expect("hdr");
+    assert_eq!(hdr.op, DdiOp::InitBk3);
+    assert_eq!(hdr.status, DdiStatus::Bk3AlreadyInitialized);
+
+    HSM.part_free(pid).await.expect("free");
+}
+
+#[tokio::test]
+async fn init_bk3_rejects_wrong_length() {
+    use azihsm_ddi_types::*;
+
+    let pid: u8 = 32;
+    HSM.part_alloc(pid, 1u128 << pid).await.expect("alloc");
+    HSM.part_enable(pid).await.expect("enable");
+
+    // 47 bytes — one short of the required 48.
+    let bk3 = [0xCD_u8; 47];
+    let (c, resp_bytes) = submit_init_bk3(pid, 1420, &bk3).await;
+    assert_eq!(cqe_status(&c), 0, "post-decode error rides as CQE Success");
+    let mut dec = DdiDecoder::new(&resp_bytes, false);
+    let hdr: DdiRespHdr = dec.decode_hdr().expect("hdr");
+    assert_eq!(hdr.op, DdiOp::InitBk3);
+    assert_eq!(hdr.status, DdiStatus::InvalidArg);
+
+    HSM.part_free(pid).await.expect("free");
+}
+
+#[tokio::test]
+async fn init_bk3_persists_masked_bk_boot_across_disable_enable() {
+    use azihsm_ddi_types::*;
+
+    let pid: u8 = 33;
+    HSM.part_alloc(pid, 1u128 << pid).await.expect("alloc");
+    HSM.part_enable(pid).await.expect("enable");
+
+    // First InitBk3 lands the masked_bk_boot in partition state.
+    let bk3 = [0xEF_u8; 48];
+    let (c, _) = submit_init_bk3(pid, 1430, &bk3).await;
+    assert_eq!(cqe_status(&c), 0);
+
+    // Bounce the partition.
+    HSM.part_disable(pid).await.expect("disable");
+    HSM.part_enable(pid).await.expect("re-enable");
+
+    // A second InitBk3 must still fail with Bk3AlreadyInitialized,
+    // proving masked_bk_boot survived disable/enable (matches mcr-hsm
+    // semantics).
+    let (c, resp_bytes) = submit_init_bk3(pid, 1431, &bk3).await;
+    assert_eq!(cqe_status(&c), 0);
+    let mut dec = DdiDecoder::new(&resp_bytes, false);
+    let hdr: DdiRespHdr = dec.decode_hdr().expect("hdr");
+    assert_eq!(hdr.status, DdiStatus::Bk3AlreadyInitialized);
+
+    HSM.part_free(pid).await.expect("free");
+}
+
+#[tokio::test]
+async fn init_bk3_cleared_on_part_free() {
+    use azihsm_ddi_types::*;
+
+    let pid: u8 = 34;
+    HSM.part_alloc(pid, 1u128 << pid).await.expect("alloc");
+    HSM.part_enable(pid).await.expect("enable");
+    let (c, _) = submit_init_bk3(pid, 1440, &[0u8; 48]).await;
+    assert_eq!(cqe_status(&c), 0);
+
+    // Free + re-alloc + re-enable. Fresh partition lifecycle: InitBk3
+    // must succeed again.
+    HSM.part_free(pid).await.expect("free");
+    HSM.part_alloc(pid, 1u128 << pid).await.expect("re-alloc");
+    HSM.part_enable(pid).await.expect("re-enable");
+
+    let (c, resp_bytes) = submit_init_bk3(pid, 1441, &[0u8; 48]).await;
+    assert_eq!(cqe_status(&c), 0);
+    let mut dec = DdiDecoder::new(&resp_bytes, false);
+    let hdr: DdiRespHdr = dec.decode_hdr().expect("hdr");
+    assert_eq!(
+        hdr.status,
+        DdiStatus::Success,
+        "InitBk3 must be allowed again after part_free + re-alloc",
+    );
+
+    HSM.part_free(pid).await.expect("free");
+}

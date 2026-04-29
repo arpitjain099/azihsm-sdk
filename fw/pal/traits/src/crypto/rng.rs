@@ -14,6 +14,10 @@ use super::super::*;
 ///
 /// Unlike [`HsmHash`] and [`HsmEcc`], this is a synchronous trait — RNG
 /// fill is fast enough that yielding to the executor is unnecessary.
+///
+/// Takes `&self` (not `&mut self`) so it can be called through a shared
+/// PAL reference from DDI dispatchers. Implementations rely on
+/// interior mutability or hardware register access for thread safety.
 pub trait HsmRng {
     /// Fill `buf` with cryptographically secure random bytes.
     ///
@@ -24,5 +28,5 @@ pub trait HsmRng {
     /// # Errors
     /// Returns [`HsmError`] if the CSPRNG fails (e.g., insufficient
     /// entropy, hardware TRNG error).
-    fn rng_fill_bytes(&mut self, buf: &mut [u8]) -> HsmResult<()>;
+    fn rng_fill_bytes(&self, buf: &mut [u8]) -> HsmResult<()>;
 }

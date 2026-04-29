@@ -75,6 +75,14 @@ pub(crate) const P384_PUB_KEY_LEN: usize = P384_COORD_SIZE * 2;
 /// bound; we adopt the smaller mcr-hsm/sim limit).
 pub(crate) const SEALED_BK3_SIZE: usize = 512;
 
+/// Maximum size of the masked BK_BOOT blob in bytes.
+///
+/// The plaintext BK_BOOT is 80 bytes (AES‖HMAC). After MaskedKey
+/// envelope encoding (header + AES header + IV + metadata + ciphertext
+/// + HMAC tag), the actual size is ~250 bytes for typical metadata.
+/// 512 leaves comfortable headroom and matches [`SEALED_BK3_SIZE`].
+pub(crate) const MASKED_BK_BOOT_SIZE: usize = 512;
+
 /// A single partition's state and cryptographic material.
 ///
 /// Each partition entry holds all per-partition data in fixed-size
@@ -160,6 +168,16 @@ pub(crate) struct PartitionEntry {
     /// `0` means "not yet set"; a `SetSealedBk3` then succeeds, and
     /// subsequent attempts return [`HsmError::SealedBk3AlreadySet`].
     pub(crate) sealed_bk3_len: u32,
+
+    /// Masked BK_BOOT blob, set once by the first successful
+    /// `InitBk3`. Subsequent `InitBk3` calls return
+    /// [`HsmError::Bk3AlreadyInitialized`]. Persists across
+    /// disable/enable; cleared on `part_free`.
+    pub(crate) masked_bk_boot: [u8; MASKED_BK_BOOT_SIZE],
+
+    /// Length of valid data in [`masked_bk_boot`](Self::masked_bk_boot).
+    /// `0` means "InitBk3 has not yet run for this partition".
+    pub(crate) masked_bk_boot_len: u32,
 }
 
 impl Default for PartitionEntry {
@@ -181,6 +199,8 @@ impl Default for PartitionEntry {
             nonce: [0u8; NONCE_LEN],
             sealed_bk3: [0u8; SEALED_BK3_SIZE],
             sealed_bk3_len: 0,
+            masked_bk_boot: [0u8; MASKED_BK_BOOT_SIZE],
+            masked_bk_boot_len: 0,
         }
     }
 }
@@ -386,6 +406,36 @@ impl HsmPartitionManager for StdHsmPal {
         }
         entry.sealed_bk3[..data.len()].copy_from_slice(data);
         entry.sealed_bk3_len = data.len() as u32;
+        Ok(())
+    }
+
+    fn part_masked_bk_boot(&self, pid: HsmPartId, out: Option<&mut [u8]>) -> HsmResult<usize> {
+        let entry = self.active_part(pid)?;
+        if entry.masked_bk_boot_len == 0 {
+            // No DDI status code currently maps to "MaskedBkBoot not present";
+            // KeyNotFound is the closest existing semantic.
+            return Err(HsmError::KeyNotFound);
+        }
+        let len = entry.masked_bk_boot_len as usize;
+        if let Some(buf) = out {
+            if buf.len() < len {
+                return Err(HsmError::InvalidArg);
+            }
+            buf[..len].copy_from_slice(&entry.masked_bk_boot[..len]);
+        }
+        Ok(len)
+    }
+
+    fn part_set_masked_bk_boot(&self, pid: HsmPartId, data: &[u8]) -> HsmResult<()> {
+        if data.len() > MASKED_BK_BOOT_SIZE {
+            return Err(HsmError::InvalidArg);
+        }
+        let entry = self.active_part_mut(pid)?;
+        if entry.masked_bk_boot_len != 0 {
+            return Err(HsmError::Bk3AlreadyInitialized);
+        }
+        entry.masked_bk_boot[..data.len()].copy_from_slice(data);
+        entry.masked_bk_boot_len = data.len() as u32;
         Ok(())
     }
 }
@@ -662,6 +712,10 @@ impl StdHsmPal {
         // across full free).
         entry.sealed_bk3.fill(0);
         entry.sealed_bk3_len = 0;
+
+        // Zeroize masked BK_BOOT (also part of provisioned state).
+        entry.masked_bk_boot.fill(0);
+        entry.masked_bk_boot_len = 0;
 
         // Release resources.
         table.global_res_mask &= !entry.res_mask;

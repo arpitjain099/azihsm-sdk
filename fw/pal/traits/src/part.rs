@@ -165,4 +165,36 @@ pub trait HsmPartitionManager {
     /// - [`HsmError::InvalidArg`] — `pid` is out of range or the
     ///   partition is not allocated.
     fn part_set_sealed_bk3(&self, pid: HsmPartId, data: &[u8]) -> HsmResult<()>;
+
+    /// Read the masked-BK_BOOT envelope previously written via
+    /// [`part_set_masked_bk_boot`](Self::part_set_masked_bk_boot).
+    ///
+    /// Pass `None` to query the size; pass `Some(buf)` to copy into
+    /// `buf` and return the number of bytes written.
+    ///
+    /// The blob is opaque to the firmware *core* — its contents are
+    /// owned by the masked-key codec in `fw/core/lib/src/masked_key.rs`.
+    /// Persists across `disable`/`enable`; cleared on `part_free`.
+    ///
+    /// # Errors
+    /// - [`HsmError::KeyNotFound`] — `InitBk3` has not yet run for this
+    ///   partition.
+    /// - [`HsmError::InvalidArg`] — `pid` is out of range, the
+    ///   partition is not allocated, or `out` is `Some(buf)` and `buf`
+    ///   is too small.
+    fn part_masked_bk_boot(&self, pid: HsmPartId, out: Option<&mut [u8]>) -> HsmResult<usize>;
+
+    /// Store the masked-BK_BOOT envelope produced by `InitBk3`.
+    ///
+    /// Single-shot: subsequent calls fail with
+    /// [`HsmError::Bk3AlreadyInitialized`] (matches mcr-hsm
+    /// `HsmErr::Bk3AlreadyInitialized`).
+    ///
+    /// # Errors
+    /// - [`HsmError::Bk3AlreadyInitialized`] — `InitBk3` already
+    ///   completed for this partition.
+    /// - [`HsmError::InvalidArg`] — `pid` is out of range, the
+    ///   partition is not allocated, or `data` exceeds the
+    ///   per-partition storage size.
+    fn part_set_masked_bk_boot(&self, pid: HsmPartId, data: &[u8]) -> HsmResult<()>;
 }
