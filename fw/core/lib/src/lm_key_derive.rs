@@ -145,3 +145,63 @@ pub fn split_aes_hmac_key(key: &[u8]) -> HsmResult<(&[u8], &[u8])> {
     }
     Ok(key.split_at(32))
 }
+
+/// KBKDF label for [`bk_session_gen`]. Mirrors
+/// `ddi/sim/src/lmkey_derive.rs` `SESSION_BK_LABEL`.
+pub const SESSION_BK_LABEL: &[u8] = b"SESSION_BK";
+
+/// Session seed size in bytes.
+pub const SESSION_SEED_SIZE_BYTES: usize = 48;
+
+/// KBKDF label for session masking-key derivation. Mirrors
+/// `ddi/sim/src/lmkey_derive.rs` `MK_DEFAULT_LABEL`.
+pub const MK_DEFAULT_LABEL: &[u8] = b"MK_DEFAULT";
+
+/// Masking key seed size in bytes.
+pub const MK_SEED_SIZE_BYTES: usize = 48;
+
+/// Derive a per-session backup key from a partition backup key and a
+/// session seed.
+///
+/// Mirrors `ddi/sim/src/lmkey_derive.rs LMKeyDerive::bk_session_gen`:
+/// uses the HMAC key half of `bk_partition` as the KBKDF key, with
+/// label [`SESSION_BK_LABEL`] and context = `session_seed`.
+///
+/// `bk_session_out.len()` must equal
+/// [`BK_AES_CBC_256_HMAC384_SIZE_BYTES`] (80).
+pub async fn bk_session_gen<P: HsmPal>(
+    pal: &P,
+    session_seed: &[u8; SESSION_SEED_SIZE_BYTES],
+    bk_partition: &[u8],
+    bk_session_out: &mut [u8],
+) -> HsmResult<()> {
+    if bk_session_out.len() != BK_AES_CBC_256_HMAC384_SIZE_BYTES {
+        return Err(HsmError::InvalidArg);
+    }
+    let (_aes_key, hmac_key) = split_aes_hmac_key(bk_partition)?;
+    pal.kbkdf(
+        hmac_key,
+        HsmHashAlgo::Sha384,
+        SESSION_BK_LABEL,
+        session_seed,
+        bk_session_out,
+    )
+    .await
+}
+
+/// Generate a fresh session masking key (80 bytes).
+///
+/// Mirrors `ddi/sim/src/lmkey_derive.rs bmk_gen` steps 1-2:
+/// 1. Generate a 48-byte random seed.
+/// 2. `KBKDF-SHA384(seed, "MK_DEFAULT", no context, 80)` → masking key.
+///
+/// `mk_out.len()` must equal [`BK_AES_CBC_256_HMAC384_SIZE_BYTES`].
+pub async fn mk_session_gen<P: HsmPal>(pal: &P, mk_out: &mut [u8]) -> HsmResult<()> {
+    if mk_out.len() != BK_AES_CBC_256_HMAC384_SIZE_BYTES {
+        return Err(HsmError::InvalidArg);
+    }
+    let mut seed = [0u8; MK_SEED_SIZE_BYTES];
+    pal.rng_fill_bytes(&mut seed)?;
+    pal.kbkdf(&seed, HsmHashAlgo::Sha384, MK_DEFAULT_LABEL, &[], mk_out)
+        .await
+}

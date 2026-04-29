@@ -171,17 +171,12 @@ impl DdiDev for DdiEmuDev {
                 .map_err(|_| DdiError::MborError(MborError::EncodeError))?;
             enc.position()
         };
-        tracing::debug!(opcode = ?opcode, len = req_len, "DdiEmu request");
+        let req_buf = &src.as_slice()[..req_len];
+        tracing::debug!(opcode = ?opcode, len = req_len, "DdiEmu request (in hex): {:02x?}", req_buf);
 
         // ── 3. Build SQE and submit on the embedded tokio runtime ─────
         let cmd_id = CMD_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let sqe = build_sqe(
-            cmd_id,
-            &src.as_slice()[..req_len],
-            dst.as_mut_slice(),
-            opcode,
-            req_session_id,
-        );
+        let sqe = build_sqe(cmd_id, req_buf, dst.as_mut_slice(), opcode, req_session_id);
 
         let cqe: HsmCqe = self
             .handle
@@ -201,7 +196,7 @@ impl DdiDev for DdiEmuDev {
             return Err(DdiError::DdiError(0));
         }
         let resp_buf = &dst.as_slice()[..resp_len];
-        tracing::trace!(opcode = ?opcode, len = resp_len, "DdiEmu response");
+        tracing::trace!(opcode = ?opcode, len = resp_len, "DdiEmu response (in hex): {:02x?}", resp_buf);
 
         let mut hdr_dec = DdiDecoder::new(resp_buf, post_decode);
         let hdr: DdiRespHdr = hdr_dec

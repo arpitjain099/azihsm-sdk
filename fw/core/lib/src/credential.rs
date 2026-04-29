@@ -31,6 +31,8 @@ use azihsm_fw_hsm_pal_traits::*;
 /// Length of the user ID and PIN payloads (one AES block each).
 pub const ID_LEN: usize = 16;
 pub const PIN_LEN: usize = 16;
+/// Session seed length (48 bytes = 3 AES blocks).
+pub const SEED_LEN: usize = 48;
 /// AES-CBC IV length.
 pub const IV_LEN: usize = 16;
 /// Partition nonce length.
@@ -126,4 +128,87 @@ pub async fn unwrap_credential<P: HsmPal>(
         .await?;
 
     Ok((id, pin))
+}
+
+/// Decrypt the `(id, pin, seed)` triple carried by an OpenSession request.
+///
+/// Same algorithm as [`unwrap_credential`] but the session credential
+/// includes a 48-byte `encrypted_seed` that is AES-CBC chained after
+/// `encrypted_pin`. The HMAC covers all three ciphertext fields:
+/// `encrypted_id || encrypted_pin || encrypted_seed || iv || nonce`
+/// (128 bytes total).
+///
+/// # Returns
+/// `(id, pin, seed)` — recovered plaintext.
+pub async fn unwrap_session_credential<P: HsmPal>(
+    pal: &P,
+    partition_priv_der: &[u8],
+    host_pub_le_raw: &[u8],
+    partition_nonce: &[u8; NONCE_LEN],
+    encrypted_id: &[u8],
+    encrypted_pin: &[u8],
+    encrypted_seed: &[u8],
+    iv: &[u8],
+    tag: &[u8],
+) -> HsmResult<([u8; ID_LEN], [u8; PIN_LEN], [u8; SEED_LEN])> {
+    if encrypted_id.len() != ID_LEN
+        || encrypted_pin.len() != PIN_LEN
+        || encrypted_seed.len() != SEED_LEN
+        || iv.len() != IV_LEN
+        || tag.len() != TAG_LEN
+    {
+        return Err(HsmError::InvalidArg);
+    }
+
+    // 1. ECDH → shared secret (48 bytes for P-384).
+    let mut shared = [0u8; 48];
+    pal.ecdh_derive(partition_priv_der, host_pub_le_raw, &mut shared)
+        .await?;
+
+    // 2. HKDF-SHA384(shared, salt=&[], info=nonce, len=80) → AES key + HMAC key.
+    let mut keys = [0u8; KEYS_LEN];
+    pal.hkdf(
+        &shared,
+        HsmHashAlgo::Sha384,
+        HkdfMode::ExtractAndExpand,
+        &[],
+        partition_nonce,
+        &mut keys,
+    )
+    .await?;
+    let (aes_key, hmac_key) = keys.split_at(32);
+
+    // 3. HMAC verify over (enc_id || enc_pin || enc_seed || iv || nonce) = 128B.
+    let mut hmac_input = [0u8; ID_LEN + PIN_LEN + SEED_LEN + IV_LEN + NONCE_LEN];
+    let mut off = 0;
+    hmac_input[off..off + ID_LEN].copy_from_slice(encrypted_id);
+    off += ID_LEN;
+    hmac_input[off..off + PIN_LEN].copy_from_slice(encrypted_pin);
+    off += PIN_LEN;
+    hmac_input[off..off + SEED_LEN].copy_from_slice(encrypted_seed);
+    off += SEED_LEN;
+    hmac_input[off..off + IV_LEN].copy_from_slice(iv);
+    off += IV_LEN;
+    hmac_input[off..off + NONCE_LEN].copy_from_slice(partition_nonce);
+    if !pal.hmac_verify(hmac_key, &hmac_input, tag).await? {
+        return Err(HsmError::PinDecryptionFailed);
+    }
+
+    // 4. AES-CBC decrypt id, pin, seed (chained IV).
+    let mut iv_chain = [0u8; IV_LEN];
+    iv_chain.copy_from_slice(iv);
+
+    let mut id = [0u8; ID_LEN];
+    pal.aes_cbc_enc_dec(aes_key, false, &mut iv_chain, encrypted_id, &mut id)
+        .await?;
+
+    let mut pin = [0u8; PIN_LEN];
+    pal.aes_cbc_enc_dec(aes_key, false, &mut iv_chain, encrypted_pin, &mut pin)
+        .await?;
+
+    let mut seed = [0u8; SEED_LEN];
+    pal.aes_cbc_enc_dec(aes_key, false, &mut iv_chain, encrypted_seed, &mut seed)
+        .await?;
+
+    Ok((id, pin, seed))
 }
