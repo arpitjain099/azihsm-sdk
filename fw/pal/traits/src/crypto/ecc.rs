@@ -145,54 +145,57 @@ pub trait HsmEcc {
 
     /// Raw EC sign over a pre-computed hash digest.
     ///
-    /// # Parameters
-    /// - `priv_key` — The signing key.
-    /// - `hash` — Pre-computed hash digest to sign.
-    /// - `signature` — Output buffer for the signature. Must be at least
-    ///   [`HsmEccCurve::sig_len`] bytes.
+    /// # Wire format
+    ///
+    /// `priv_key` and `signature` use the byte representations
+    /// produced by [`ecc_gen_keypair`](Self::ecc_gen_keypair) and
+    /// related host-side codecs:
+    ///
+    /// * `priv_key` — PKCS#8-DER encoded private key. The curve is
+    ///   extracted from the DER metadata.
+    /// * `signature` — Raw `r ‖ s` (no DER framing). Length must be
+    ///   `2 * curve.point_size()`.
     ///
     /// # Errors
     /// Returns [`HsmError`] if signing fails or the buffer is too small.
-    async fn ecc_sign(
-        &self,
-        curve: HsmEccCurve,
-        priv_key: &[u8],
-        hash: &[u8],
-        signature: &mut [u8],
-    ) -> HsmResult<()>;
+    async fn ecc_sign(&self, priv_key: &[u8], hash: &[u8], signature: &mut [u8]) -> HsmResult<()>;
 
     /// Raw EC verify a signature over a pre-computed hash digest.
     ///
-    /// # Parameters
-    /// - `pub_key` — The verification key.
-    /// - `curve` — The NIST curve that the key was generated on (P-256,
-    ///   P-384, or P-521). Used to determine the expected signature length.
-    /// - `hash` — Pre-computed hash digest that was signed.
-    /// - `signature` — The signature to verify.
+    /// # Wire format
+    ///
+    /// * `pub_key` — Raw public key in PKA-native byte order:
+    ///   little-endian X concatenated with little-endian Y. The curve
+    ///   is inferred from the buffer length:
+    ///   `64` → P-256, `96` → P-384, `132` → P-521. Any other length
+    ///   yields [`HsmError::InvalidArg`].
+    /// * `signature` — Raw `r ‖ s` (no DER framing).
     ///
     /// # Returns
     /// `true` if the signature is valid, `false` otherwise.
-    async fn ecc_verify(
-        &self,
-        curve: HsmEccCurve,
-        pub_key: &[u8],
-        hash: &[u8],
-        signature: &[u8],
-    ) -> HsmResult<bool>;
+    ///
+    /// # Errors
+    /// Returns [`HsmError`] if the verify operation itself fails
+    /// (distinct from a returned `false`, which means the signature
+    /// is well-formed but does not match).
+    async fn ecc_verify(&self, pub_key: &[u8], hash: &[u8], signature: &[u8]) -> HsmResult<bool>;
 
     /// Perform ECDH key agreement to derive a shared secret.
     ///
-    /// # Parameters
-    /// - `priv_key` — The local private key.
-    /// - `pub_key` — The remote party's public key.
-    /// - `secret` — Output for the derived shared secret.
+    /// # Wire format
+    ///
+    /// * `priv_key` — PKCS#8-DER private key (curve embedded).
+    /// * `pub_key` — Raw public key as `LE X ‖ LE Y`; curve inferred
+    ///   from length and validated against the private key's curve.
+    /// * `secret` — Output buffer; written length is
+    ///   `curve.point_size()`.
     ///
     /// # Errors
-    /// Returns [`HsmError`] if the key agreement operation fails (e.g., PKA
-    /// engine error, invalid public key point).
+    /// Returns [`HsmError`] if the key agreement operation fails
+    /// (e.g., PKA engine error, invalid public key point, mismatched
+    /// curves on the two keys).
     async fn ecdh_derive(
         &self,
-        curve: HsmEccCurve,
         priv_key: &[u8],
         pub_key: &[u8],
         secret: &mut [u8],

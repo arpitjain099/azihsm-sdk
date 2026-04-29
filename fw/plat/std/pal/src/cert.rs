@@ -353,8 +353,7 @@ impl StdHsmPal {
         self.hash(HsmHashAlgo::Sha384, tbs, &mut tbs_hash).await?;
 
         let mut sig = [0u8; 96];
-        self.ecc_sign(HsmEccCurve::P384, priv_der, &tbs_hash, &mut sig)
-            .await?;
+        self.ecc_sign(priv_der, &tbs_hash, &mut sig).await?;
 
         let mut r = [0u8; P384_SIG_COMPONENT];
         let mut s = [0u8; P384_SIG_COMPONENT];

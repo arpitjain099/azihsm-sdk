@@ -62,13 +62,8 @@ pub(crate) async fn get_establish_cred_encryption_key<'a, P: HsmPal>(
     let digest = &mut fmem[..HsmHashAlgo::Sha384.digest_len()];
     pal.hash(HsmHashAlgo::Sha384, frame.pub_key.raw, digest)
         .await?;
-    pal.ecc_sign(
-        HsmEccCurve::P384,
-        id_priv_key,
-        digest,
-        frame.pub_key_signature,
-    )
-    .await?;
+    pal.ecc_sign(id_priv_key, digest, frame.pub_key_signature)
+        .await?;
 
     Ok(&smem[..total])
 }

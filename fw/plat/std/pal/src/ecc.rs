@@ -32,9 +32,6 @@
 //! ```
 
 use azihsm_crypto::EccCurve;
-use azihsm_crypto::EccPrivateKey;
-use azihsm_crypto::EccPublicKey;
-use azihsm_crypto::ImportableKey;
 
 use super::*;
 
@@ -82,87 +79,30 @@ impl HsmEcc for StdHsmPal {
 
     /// Raw EC sign over a pre-computed hash digest.
     ///
-    /// Imports the private key from PKCS#8 DER, delegates signing to
-    /// the driver, and copies the raw `r ∥ s` signature into the
-    /// caller's buffer.
-    ///
-    /// # Parameters
-    /// - `_curve` — Curve hint (unused; curve is encoded in the DER key).
-    /// - `priv_key` — PKCS#8 DER private key bytes.
-    /// - `hash` — Pre-computed hash digest to sign.
-    /// - `signature` — Output buffer (must be ≥ [`HsmEccCurve::sig_len`]).
-    ///
-    /// # Errors
-    /// - [`HsmError::InvalidArg`] — DER import failed.
-    /// - [`HsmError::EccSignFailed`] — signing failed or buffer too small.
-    async fn ecc_sign(
-        &self,
-        _curve: HsmEccCurve,
-        priv_key: &[u8],
-        hash: &[u8],
-        signature: &mut [u8],
-    ) -> HsmResult<()> {
-        let key = EccPrivateKey::from_bytes(priv_key).map_err(|_| HsmError::InvalidArg)?;
-        let sig = self.ecc.ecc_sign(&key, hash).await?;
-        if signature.len() < sig.len() {
-            return Err(HsmError::EccSignFailed);
-        }
-        signature[..sig.len()].copy_from_slice(&sig);
-        Ok(())
+    /// Pass-through to [`StdEcc::ecc_sign`]. The PAL-trait byte-format
+    /// contract is documented on the trait method itself.
+    async fn ecc_sign(&self, priv_key: &[u8], hash: &[u8], signature: &mut [u8]) -> HsmResult<()> {
+        self.ecc.ecc_sign(priv_key, hash, signature).await
     }
 
     /// Raw EC verify a signature over a pre-computed hash digest.
     ///
-    /// Imports the public key from SPKI DER, delegates verification
-    /// to the driver.
-    ///
-    /// # Parameters
-    /// - `_curve` — Curve hint (unused; curve is encoded in the DER key).
-    /// - `pub_key` — SPKI DER public key bytes.
-    /// - `hash` — Pre-computed hash digest that was signed.
-    /// - `signature` — The raw `r ∥ s` signature to verify.
-    ///
-    /// # Returns
-    /// `true` if valid, `false` otherwise.
-    ///
-    /// # Errors
-    /// - [`HsmError::InvalidArg`] — DER import failed.
-    /// - [`HsmError::EccVerifyFailed`] — OpenSSL verification error.
-    async fn ecc_verify(
-        &self,
-        _curve: HsmEccCurve,
-        pub_key: &[u8],
-        hash: &[u8],
-        signature: &[u8],
-    ) -> HsmResult<bool> {
-        let key = EccPublicKey::from_bytes(pub_key).map_err(|_| HsmError::InvalidArg)?;
-        self.ecc.ecc_verify(&key, hash, signature).await
+    /// Pass-through to [`StdEcc::ecc_verify`]. The PAL-trait byte-format
+    /// contract is documented on the trait method itself.
+    async fn ecc_verify(&self, pub_key: &[u8], hash: &[u8], signature: &[u8]) -> HsmResult<bool> {
+        self.ecc.ecc_verify(pub_key, hash, signature).await
     }
 
     /// ECDH key agreement — derives a shared secret.
     ///
-    /// Imports both keys from DER, delegates ECDH to the driver, and
-    /// writes the raw shared secret (x-coordinate) into `secret`.
-    ///
-    /// # Parameters
-    /// - `_curve` — Curve hint (unused; curve is encoded in the DER keys).
-    /// - `priv_key` — PKCS#8 DER local private key bytes.
-    /// - `pub_key` — SPKI DER remote public key bytes.
-    /// - `secret` — Output buffer (must be ≥ [`HsmEccCurve::secret_len`]).
-    ///
-    /// # Errors
-    /// - [`HsmError::InvalidArg`] — DER import failed.
-    /// - [`HsmError::EccDeriveError`] — ECDH computation failed or
-    ///   output buffer too small.
+    /// Pass-through to [`StdEcc::ecdh_derive`]. The PAL-trait byte-format
+    /// contract is documented on the trait method itself.
     async fn ecdh_derive(
         &self,
-        _curve: HsmEccCurve,
         priv_key: &[u8],
         pub_key: &[u8],
         secret: &mut [u8],
     ) -> HsmResult<()> {
-        let pk = EccPrivateKey::from_bytes(priv_key).map_err(|_| HsmError::InvalidArg)?;
-        let pubk = EccPublicKey::from_bytes(pub_key).map_err(|_| HsmError::InvalidArg)?;
-        self.ecc.ecdh_derive(&pk, &pubk, secret).await
+        self.ecc.ecdh_derive(priv_key, pub_key, secret).await
     }
 }
