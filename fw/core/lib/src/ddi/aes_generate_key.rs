@@ -63,18 +63,20 @@ pub(crate) async fn aes_generate_key<'a, P: HsmPal>(
     };
 
     // ── 2. Parse key usage from metadata bitflags ─────────────────────
+    // AES keys only allow EncryptDecrypt usage (matching sim's
+    // KeyClass::Aes::allows_usage).
     let md = &body.key_properties.key_metadata.blob;
     let mut attrs = HsmVaultKeyAttrs::new();
-    if meta_bit(md, BIT_ENCRYPT) && meta_bit(md, BIT_DECRYPT) {
+    if meta_bit(md, BIT_ENCRYPT)
+        && meta_bit(md, BIT_DECRYPT)
+        && !meta_bit(md, BIT_SIGN)
+        && !meta_bit(md, BIT_VERIFY)
+        && !meta_bit(md, BIT_DERIVE)
+        && !meta_bit(md, BIT_UNWRAP)
+    {
         attrs = attrs.with_encrypt(true).with_decrypt(true);
-    } else if meta_bit(md, BIT_SIGN) && meta_bit(md, BIT_VERIFY) {
-        attrs = attrs.with_sign(true).with_verify(true);
-    } else if meta_bit(md, BIT_UNWRAP) {
-        attrs = attrs.with_unwrap(true);
-    } else if meta_bit(md, BIT_DERIVE) {
-        return Err(HsmError::InvalidPermissions);
     } else {
-        return Err(HsmError::InvalidArg);
+        return Err(HsmError::InvalidPermissions);
     }
 
     if session_only {
