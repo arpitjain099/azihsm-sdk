@@ -123,20 +123,23 @@ pub(crate) async fn aes_generate_key<'a, P: HsmPal>(
     )?;
 
     // ── 7. Encode masked key ──────────────────────────────────────────
-    let bmk_len = masked_key::aes_cbc_envelope_len(metadata_len, key_len);
+    // The masked-key encoder requires the plaintext to be a multiple of
+    // AES_BLOCK_SIZE (16). For AES-192 (24 bytes) we must zero-pad.
+    let padded_key_len = key_len.next_multiple_of(16);
+    let bmk_len = masked_key::aes_cbc_envelope_len(metadata_len, padded_key_len);
     // Use a region of fmem after the plaintext key bytes.
-    let bmk_off = key_len;
+    let bmk_off = padded_key_len;
     if bmk_off + bmk_len > fmem.len() {
         return Err(HsmError::InternalError);
     }
 
-    // Copy plaintext key to a local array so fmem can be split.
+    // Copy plaintext key to a local array, zero-padded to block size.
     let mut pt_key = [0u8; 32];
     pt_key[..key_len].copy_from_slice(&fmem[..key_len]);
 
     masked_key::encode_aes_cbc_256_hmac384(
         pal,
-        &pt_key[..key_len],
+        &pt_key[..padded_key_len],
         masking_key,
         &metadata_buf[..metadata_len],
         &mut fmem[bmk_off..bmk_off + bmk_len],
