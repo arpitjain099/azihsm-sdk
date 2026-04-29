@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+pub(crate) mod close_session;
 pub(crate) mod establish_credential;
 pub(crate) mod get_api_rev;
 pub(crate) mod get_cert_chain_info;
@@ -19,6 +20,7 @@ use azihsm_fw_ddi::DdiEncoder;
 use azihsm_fw_ddi_mbor::*;
 use azihsm_fw_ddi_types::error::DdiErrResp;
 use azihsm_fw_ddi_types::*;
+pub(crate) use close_session::*;
 pub(crate) use establish_credential::*;
 pub(crate) use get_api_rev::*;
 pub(crate) use get_cert_chain_info::*;
@@ -70,6 +72,7 @@ pub(crate) async fn dispatch<P: HsmPal>(
             get_session_encryption_key(hdr, decoder, part_id, pal, fmem, smem).await?
         }
         DdiOp::OpenSession => open_session(hdr, decoder, part_id, pal, fmem, smem).await?,
+        DdiOp::CloseSession => close_session(hdr, decoder, part_id, pal, fmem, smem)?,
         _ => return Err(HsmError::UnsupportedCmd),
     };
     Ok(resp.len())

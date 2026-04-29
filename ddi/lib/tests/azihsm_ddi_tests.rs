@@ -12,6 +12,7 @@ mod integration {
     pub mod attest_key;
     pub mod change_pin;
     pub mod close_session;
+    pub mod close_session_smoke;
     pub mod common;
     pub mod ddi_dev_info;
     pub mod delete_key;
