@@ -32,10 +32,8 @@
 //! ```
 
 use azihsm_crypto::EccCurve;
-use azihsm_crypto::EccKeyOp;
 use azihsm_crypto::EccPrivateKey;
 use azihsm_crypto::EccPublicKey;
-use azihsm_crypto::ExportableKey;
 use azihsm_crypto::ImportableKey;
 
 use super::*;
@@ -59,8 +57,11 @@ impl HsmEcc for StdHsmPal {
     ///
     /// # Parameters
     /// - `curve` — NIST curve (P-256, P-384, or P-521).
-    /// - `priv_key` — Output buffer for PKCS#8 DER private key.
-    /// - `pub_key` — Output buffer for SPKI DER public key.
+    /// - `priv_key` — Output buffer for PKCS#8 DER private key
+    ///   (`None` to query required size).
+    /// - `pub_key` — Output buffer for raw public-key coordinates in
+    ///   PKA-native order: little-endian X ‖ little-endian Y. Must be
+    ///   at least [`HsmEccCurve::pub_key_len`] bytes.
     /// - `_pct` — Pairwise consistency test mode (currently ignored).
     ///
     /// # Errors
@@ -74,29 +75,9 @@ impl HsmEcc for StdHsmPal {
         pub_key: &mut [u8],
         _pct: HsmEccPct,
     ) -> HsmResult<usize> {
-        let (pk, pubk) = self.ecc.gen_keypair(to_ecc_curve(curve)).await?;
-
-        // Export private key as PKCS#8 DER.
-        let priv_len = pk.to_bytes(None).map_err(|_| HsmError::EccToDerError)?;
-        if let Some(buf) = priv_key {
-            if buf.len() < priv_len {
-                return Err(HsmError::EccInvalidKeyLength);
-            }
-            pk.to_bytes(Some(&mut buf[..priv_len]))
-                .map_err(|_| HsmError::EccToDerError)?;
-        }
-
-        // Export public key as raw coordinates (x ∥ y).
-        let coord_len = curve.pub_key_len();
-        if pub_key.len() < coord_len {
-            return Err(HsmError::EccInvalidKeyLength);
-        }
-        let half = coord_len / 2;
-        let (x_buf, y_buf) = pub_key[..coord_len].split_at_mut(half);
-        pubk.coord(Some((x_buf, y_buf)))
-            .map_err(|_| HsmError::EccToDerError)?;
-
-        Ok(priv_len)
+        self.ecc
+            .gen_keypair(to_ecc_curve(curve), priv_key, pub_key)
+            .await
     }
 
     /// Raw EC sign over a pre-computed hash digest.

@@ -76,11 +76,22 @@ fn make_leaf_sn(pid: u8) -> [u8; 4] {
     [b'P', b'D', to_hex(hi), to_hex(lo)]
 }
 
-/// Build uncompressed public key (0x04 || x || y) from raw coords.
-fn to_uncompressed(raw: &[u8; P384_PUB_KEY_LEN]) -> [u8; P384_UNCOMPRESSED_LEN] {
+/// Build the X.509 uncompressed public-key encoding (`0x04 || x_be || y_be`)
+/// from raw PKA-native coordinates.
+///
+/// The PAL contract for [`HsmEcc::ecc_gen_keypair`] (and therefore everything
+/// stored in the partition's `*_pub_key` arrays) emits PKA-native order:
+/// little-endian X concatenated with little-endian Y. X.509
+/// `SubjectPublicKeyInfo` requires big-endian coordinates, so each half
+/// is byte-reversed when assembling the uncompressed point.
+fn to_uncompressed(le_raw: &[u8; P384_PUB_KEY_LEN]) -> [u8; P384_UNCOMPRESSED_LEN] {
+    const HALF: usize = P384_PUB_KEY_LEN / 2;
     let mut out = [0u8; P384_UNCOMPRESSED_LEN];
     out[0] = 0x04;
-    out[1..].copy_from_slice(raw);
+    for i in 0..HALF {
+        out[1 + i] = le_raw[HALF - 1 - i];
+        out[1 + HALF + i] = le_raw[2 * HALF - 1 - i];
+    }
     out
 }
 

@@ -580,6 +580,12 @@ pub(crate) enum SessionCtrl {
 
 impl SessionCtrl {
     /// Map a DDI opcode to its session control kind.
+    ///
+    /// Must agree with the canonical host-side mapping in
+    /// [`azihsm_ddi_types::SessionControlKind::from(DdiOp)`]
+    /// (`ddi/serde/types/src/sessctrl.rs`). Any divergence causes
+    /// session-hijack validation in `Hsm::validate_session` to reject
+    /// otherwise-valid IOs with [`HsmError::InvalidArg`].
     pub fn from_op(op: azihsm_fw_ddi_types::DdiOp) -> Self {
         use azihsm_fw_ddi_types::DdiOp;
         match op {
@@ -588,6 +594,11 @@ impl SessionCtrl {
             | DdiOp::GetCertChainInfo
             | DdiOp::GetCertificate
             | DdiOp::GetEstablishCredEncryptionKey
+            | DdiOp::EstablishCredential
+            | DdiOp::GetSessionEncryptionKey
+            | DdiOp::InitBk3
+            | DdiOp::GetSealedBk3
+            | DdiOp::SetSealedBk3
             | DdiOp::ShaDigest => Self::NoSession,
             DdiOp::OpenSession => Self::Open,
             DdiOp::CloseSession => Self::Close,

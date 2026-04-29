@@ -117,14 +117,23 @@ pub trait HsmEcc {
     /// query size).  Writes raw public key coordinates (x ∥ y) into
     /// `pub_key` — fixed size per curve: [`HsmEccCurve::pub_key_len`].
     ///
+    /// # Wire format
+    ///
+    /// `pub_key` receives PKA-native byte order: **little-endian X
+    /// concatenated with little-endian Y**, matching the output of real
+    /// PKA hardware (Cortex-M7 and compatible). Consumers that need
+    /// big-endian (e.g. X.509 SubjectPublicKeyInfo, the host SDK when
+    /// the device advertises `Virtual`) must reverse each half.
+    ///
     /// # Returns
     /// The actual private key DER length written.
     ///
     /// # Parameters
     /// - `curve` — The NIST curve to use for key generation.
     /// - `priv_key` — `None` to query size, `Some(buf)` for PKCS#8 DER output.
-    /// - `pub_key` — Output buffer for raw coordinates (x ∥ y).  Must be
-    ///   at least [`HsmEccCurve::pub_key_len`] bytes.
+    /// - `pub_key` — Output buffer for raw coordinates (x ∥ y) in
+    ///   PKA-native (little-endian) byte order.  Must be at least
+    ///   [`HsmEccCurve::pub_key_len`] bytes.
     /// - `pct` — Pairwise Consistency Test mode.
     async fn ecc_gen_keypair(
         &self,

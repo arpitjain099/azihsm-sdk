@@ -13,7 +13,7 @@
 //!
 //! | Method | Operation | Input | Output |
 //! |--------|-----------|-------|--------|
-//! | [`gen_keypair`] | Key generation | `EccCurve` | `(EccPrivateKey, EccPublicKey)` |
+//! | [`gen_keypair`] | Key generation | `EccCurve`, mut buffers | `priv_len: usize` |
 //! | [`ecc_sign`] | Raw EC sign | `&EccPrivateKey`, `&[u8]` hash | `Vec<u8>` (r∥s) |
 //! | [`ecc_verify`] | Raw EC verify | `&EccPublicKey`, `&[u8]` hash, `&[u8]` sig | `bool` |
 //! | [`ecdh_derive`] | ECDH agreement | `&EccPrivateKey`, `&EccPublicKey` | writes `&mut [u8]` |
@@ -53,20 +53,85 @@ impl StdEcc {
         Self { pool }
     }
 
-    /// Generate an ECC key pair asynchronously.
+    /// Generate an ECC key pair, writing PKA-native byte representations
+    /// directly into caller-provided buffers.
     ///
-    /// Returns the `(EccPrivateKey, EccPublicKey)` handle pair.
-    pub async fn gen_keypair(&self, curve: EccCurve) -> HsmResult<(EccPrivateKey, EccPublicKey)> {
-        self.pool
+    /// # Output formats
+    ///
+    /// * `priv_der` — When `Some`, receives the PKCS#8-DER private key.
+    ///   When `None`, no write happens; the function still returns the
+    ///   number of bytes that *would* be required.
+    /// * `pub_le_raw` — Receives raw public-key coordinates as
+    ///   little-endian X concatenated with little-endian Y. This matches
+    ///   the byte order produced by real PKA hardware (Cortex-M7 and
+    ///   compatible), and is also the format the host SDK expects when
+    ///   the device advertises [`DdiDeviceKind::Physical`] (its
+    ///   `pub_key_der_post_decode` hook reverses each half back to
+    ///   big-endian before assembling DER). Buffer must be at least
+    ///   `2 * curve.point_size()` bytes.
+    ///
+    /// # Returns
+    ///
+    /// The PKCS#8-DER private-key length (written to or required by
+    /// `priv_der`).
+    ///
+    /// # Errors
+    ///
+    /// * [`HsmError::EccGenerateError`] / [`HsmError::EccGetCoordinatesError`]
+    ///   — OpenSSL keygen / coordinate extraction failed.
+    /// * [`HsmError::EccToDerError`] — DER export failed.
+    /// * [`HsmError::EccInvalidKeyLength`] — caller-provided buffer too small.
+    pub async fn gen_keypair(
+        &self,
+        curve: EccCurve,
+        priv_der: Option<&mut [u8]>,
+        pub_le_raw: &mut [u8],
+    ) -> HsmResult<usize> {
+        // Keygen on the worker thread (matches what real PKA hardware
+        // would offload). Byte serialization happens on the caller
+        // thread below so that we can write straight into the supplied
+        // mutable slices.
+        let (priv_key, pub_key) = self
+            .pool
             .submit_with_result(async move {
                 let priv_key =
                     EccPrivateKey::from_curve(curve).map_err(|_| HsmError::EccGenerateError)?;
                 let pub_key = priv_key
                     .public_key()
                     .map_err(|_| HsmError::EccGetCoordinatesError)?;
-                Ok((priv_key, pub_key))
+                Ok::<_, HsmError>((priv_key, pub_key))
             })
-            .await
+            .await?;
+
+        // ── Private key: PKCS#8 DER ───────────────────────────────
+        let priv_len = priv_key
+            .to_bytes(None)
+            .map_err(|_| HsmError::EccToDerError)?;
+        if let Some(buf) = priv_der {
+            if buf.len() < priv_len {
+                return Err(HsmError::EccInvalidKeyLength);
+            }
+            priv_key
+                .to_bytes(Some(&mut buf[..priv_len]))
+                .map_err(|_| HsmError::EccToDerError)?;
+        }
+
+        // ── Public key: PKA-native (little-endian) X ‖ Y ──────────
+        let coord_len = curve.point_size() * 2;
+        if pub_le_raw.len() < coord_len {
+            return Err(HsmError::EccInvalidKeyLength);
+        }
+        let half = coord_len / 2;
+        let (x_buf, y_buf) = pub_le_raw[..coord_len].split_at_mut(half);
+        // OpenSSL emits big-endian; reverse each half in place to get
+        // PKA-native little-endian.
+        pub_key
+            .coord(Some((x_buf, y_buf)))
+            .map_err(|_| HsmError::EccGetCoordinatesError)?;
+        x_buf.reverse();
+        y_buf.reverse();
+
+        Ok(priv_len)
     }
 
     /// Raw EC sign over a pre-computed hash digest.
@@ -165,6 +230,7 @@ impl StdEcc {
 
 #[cfg(test)]
 mod tests {
+    use azihsm_crypto::ImportableKey;
     use tokio::runtime::Handle;
 
     use super::*;
@@ -173,30 +239,97 @@ mod tests {
         StdEcc::new(WorkerPool::new(Handle::current()))
     }
 
+    /// Construct a fresh `(priv, pub)` handle pair without going through
+    /// the byte-oriented driver API.  Used by sign/verify/ECDH tests
+    /// which need handles for the next operation.
+    fn make_handles(curve: EccCurve) -> (EccPrivateKey, EccPublicKey) {
+        let priv_key = EccPrivateKey::from_curve(curve).unwrap();
+        let pub_key = priv_key.public_key().unwrap();
+        (priv_key, pub_key)
+    }
+
+    /// Reverse a (LE‖LE) raw public key into a (BE‖BE) form so it can be
+    /// re-imported via [`EccPublicKey::from_coordinates`].
+    fn le_raw_to_be_coords(le: &[u8], coord_size: usize) -> (Vec<u8>, Vec<u8>) {
+        let half = coord_size;
+        let mut be_x = vec![0u8; half];
+        let mut be_y = vec![0u8; half];
+        for i in 0..half {
+            be_x[i] = le[half - 1 - i];
+            be_y[i] = le[2 * half - 1 - i];
+        }
+        (be_x, be_y)
+    }
+
     // ── Key generation ──────────────────────────────────────────
 
     #[tokio::test]
-    async fn gen_keypair_p256() {
+    async fn gen_keypair_p256_byte_format() {
         let driver = make_driver();
-        let (priv_key, pub_key) = driver.gen_keypair(EccCurve::P256).await.unwrap();
+        let mut priv_der = vec![0u8; 200];
+        let mut pub_le = [0u8; 64];
+
+        let priv_len = driver
+            .gen_keypair(EccCurve::P256, Some(&mut priv_der), &mut pub_le)
+            .await
+            .unwrap();
+        priv_der.truncate(priv_len);
+
+        // Private key parses as PKCS#8 DER.
+        let priv_key = EccPrivateKey::from_bytes(&priv_der).unwrap();
         assert_eq!(EccKeyOp::curve(&priv_key), EccCurve::P256);
-        assert_eq!(pub_key.curve(), EccCurve::P256);
+
+        // Reverse each half to BE, reconstruct the public key, and prove
+        // it matches the private key by signing/verifying.
+        let (be_x, be_y) = le_raw_to_be_coords(&pub_le, 32);
+        let pub_key = EccPublicKey::from_coordinates(EccCurve::P256, &be_x, &be_y).unwrap();
+        let hash = [0xABu8; 32];
+        let sig = driver.ecc_sign(&priv_key, &hash).await.unwrap();
+        assert!(driver.ecc_verify(&pub_key, &hash, &sig).await.unwrap());
     }
 
     #[tokio::test]
-    async fn gen_keypair_p384() {
+    async fn gen_keypair_p384_byte_format() {
         let driver = make_driver();
-        let (priv_key, pub_key) = driver.gen_keypair(EccCurve::P384).await.unwrap();
+        let mut priv_der = vec![0u8; 256];
+        let mut pub_le = [0u8; 96];
+
+        let priv_len = driver
+            .gen_keypair(EccCurve::P384, Some(&mut priv_der), &mut pub_le)
+            .await
+            .unwrap();
+        priv_der.truncate(priv_len);
+
+        let priv_key = EccPrivateKey::from_bytes(&priv_der).unwrap();
         assert_eq!(EccKeyOp::curve(&priv_key), EccCurve::P384);
-        assert_eq!(pub_key.curve(), EccCurve::P384);
+
+        let (be_x, be_y) = le_raw_to_be_coords(&pub_le, 48);
+        let pub_key = EccPublicKey::from_coordinates(EccCurve::P384, &be_x, &be_y).unwrap();
+        let hash = [0xCDu8; 48];
+        let sig = driver.ecc_sign(&priv_key, &hash).await.unwrap();
+        assert!(driver.ecc_verify(&pub_key, &hash, &sig).await.unwrap());
     }
 
     #[tokio::test]
-    async fn gen_keypair_p521() {
+    async fn gen_keypair_priv_size_query() {
         let driver = make_driver();
-        let (priv_key, pub_key) = driver.gen_keypair(EccCurve::P521).await.unwrap();
-        assert_eq!(EccKeyOp::curve(&priv_key), EccCurve::P521);
-        assert_eq!(pub_key.curve(), EccCurve::P521);
+        let mut pub_le = [0u8; 96];
+        let priv_len = driver
+            .gen_keypair(EccCurve::P384, None, &mut pub_le)
+            .await
+            .unwrap();
+        assert!(priv_len > 0);
+    }
+
+    #[tokio::test]
+    async fn gen_keypair_pub_buffer_too_small() {
+        let driver = make_driver();
+        let mut pub_le = [0u8; 32]; // too small for P-384 (needs 96)
+        let err = driver
+            .gen_keypair(EccCurve::P384, None, &mut pub_le)
+            .await
+            .unwrap_err();
+        assert_eq!(err, HsmError::EccInvalidKeyLength);
     }
 
     // ── Sign / verify roundtrip ─────────────────────────────────
@@ -204,7 +337,7 @@ mod tests {
     #[tokio::test]
     async fn sign_verify_p256() {
         let driver = make_driver();
-        let (priv_key, pub_key) = driver.gen_keypair(EccCurve::P256).await.unwrap();
+        let (priv_key, pub_key) = make_handles(EccCurve::P256);
         let hash = [0xABu8; 32];
         let sig = driver.ecc_sign(&priv_key, &hash).await.unwrap();
         assert_eq!(sig.len(), 64);
@@ -214,7 +347,7 @@ mod tests {
     #[tokio::test]
     async fn sign_verify_p384() {
         let driver = make_driver();
-        let (priv_key, pub_key) = driver.gen_keypair(EccCurve::P384).await.unwrap();
+        let (priv_key, pub_key) = make_handles(EccCurve::P384);
         let hash = [0xCDu8; 48];
         let sig = driver.ecc_sign(&priv_key, &hash).await.unwrap();
         assert_eq!(sig.len(), 96);
@@ -224,7 +357,7 @@ mod tests {
     #[tokio::test]
     async fn sign_verify_p521() {
         let driver = make_driver();
-        let (priv_key, pub_key) = driver.gen_keypair(EccCurve::P521).await.unwrap();
+        let (priv_key, pub_key) = make_handles(EccCurve::P521);
         let hash = [0xEFu8; 64];
         let sig = driver.ecc_sign(&priv_key, &hash).await.unwrap();
         assert_eq!(sig.len(), 132);
@@ -236,7 +369,7 @@ mod tests {
     #[tokio::test]
     async fn verify_wrong_hash_p256() {
         let driver = make_driver();
-        let (priv_key, pub_key) = driver.gen_keypair(EccCurve::P256).await.unwrap();
+        let (priv_key, pub_key) = make_handles(EccCurve::P256);
         let sig = driver.ecc_sign(&priv_key, &[0xAAu8; 32]).await.unwrap();
         assert!(!driver
             .ecc_verify(&pub_key, &[0xBBu8; 32], &sig)
@@ -247,7 +380,7 @@ mod tests {
     #[tokio::test]
     async fn verify_wrong_hash_p384() {
         let driver = make_driver();
-        let (priv_key, pub_key) = driver.gen_keypair(EccCurve::P384).await.unwrap();
+        let (priv_key, pub_key) = make_handles(EccCurve::P384);
         let sig = driver.ecc_sign(&priv_key, &[0xAAu8; 48]).await.unwrap();
         assert!(!driver
             .ecc_verify(&pub_key, &[0xBBu8; 48], &sig)
@@ -258,7 +391,7 @@ mod tests {
     #[tokio::test]
     async fn verify_wrong_hash_p521() {
         let driver = make_driver();
-        let (priv_key, pub_key) = driver.gen_keypair(EccCurve::P521).await.unwrap();
+        let (priv_key, pub_key) = make_handles(EccCurve::P521);
         let sig = driver.ecc_sign(&priv_key, &[0xAAu8; 64]).await.unwrap();
         assert!(!driver
             .ecc_verify(&pub_key, &[0xBBu8; 64], &sig)
@@ -271,8 +404,8 @@ mod tests {
     #[tokio::test]
     async fn ecdh_p256() {
         let driver = make_driver();
-        let (priv_a, pub_a) = driver.gen_keypair(EccCurve::P256).await.unwrap();
-        let (priv_b, pub_b) = driver.gen_keypair(EccCurve::P256).await.unwrap();
+        let (priv_a, pub_a) = make_handles(EccCurve::P256);
+        let (priv_b, pub_b) = make_handles(EccCurve::P256);
         let mut secret_ab = [0u8; 32];
         let mut secret_ba = [0u8; 32];
         driver
@@ -290,8 +423,8 @@ mod tests {
     #[tokio::test]
     async fn ecdh_p384() {
         let driver = make_driver();
-        let (priv_a, pub_a) = driver.gen_keypair(EccCurve::P384).await.unwrap();
-        let (priv_b, pub_b) = driver.gen_keypair(EccCurve::P384).await.unwrap();
+        let (priv_a, pub_a) = make_handles(EccCurve::P384);
+        let (priv_b, pub_b) = make_handles(EccCurve::P384);
         let mut secret_ab = [0u8; 48];
         let mut secret_ba = [0u8; 48];
         driver
@@ -309,8 +442,8 @@ mod tests {
     #[tokio::test]
     async fn ecdh_p521() {
         let driver = make_driver();
-        let (priv_a, pub_a) = driver.gen_keypair(EccCurve::P521).await.unwrap();
-        let (priv_b, pub_b) = driver.gen_keypair(EccCurve::P521).await.unwrap();
+        let (priv_a, pub_a) = make_handles(EccCurve::P521);
+        let (priv_b, pub_b) = make_handles(EccCurve::P521);
         let mut secret_ab = [0u8; 66];
         let mut secret_ba = [0u8; 66];
         driver

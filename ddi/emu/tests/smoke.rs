@@ -7,6 +7,7 @@
 //! would, and check that DDI requests reach the in-process firmware and
 //! come back with sane data.
 
+use azihsm_cred_encrypt::DeviceCredKey;
 use azihsm_ddi_emu::DdiEmu;
 use azihsm_ddi_emu::EMU_DEVICE_PATH;
 use azihsm_ddi_interface::Ddi;
@@ -16,6 +17,8 @@ use azihsm_ddi_types::DdiApiRev;
 use azihsm_ddi_types::DdiDeviceKind;
 use azihsm_ddi_types::DdiGetApiRevCmdReq;
 use azihsm_ddi_types::DdiGetApiRevReq;
+use azihsm_ddi_types::DdiGetEstablishCredEncryptionKeyCmdReq;
+use azihsm_ddi_types::DdiGetEstablishCredEncryptionKeyReq;
 use azihsm_ddi_types::DdiHashAlgorithm;
 use azihsm_ddi_types::DdiOp;
 use azihsm_ddi_types::DdiReqHdr;
@@ -116,4 +119,47 @@ fn sha256_digest_round_trips_through_emulator() {
         &expected[..],
         "SHA-256(\"abc\") mismatch",
     );
+}
+
+/// Round-trip [`DdiOp::GetEstablishCredEncryptionKey`] through the
+/// emulator and parse the response with [`DeviceCredKey::new`].
+///
+/// `DeviceCredKey::new` calls `EccPublicKey::from_bytes` on the returned
+/// `pub_key.der` field, which only succeeds if the bytes are valid DER.
+/// Firmware emits raw PKA-native (little-endian) coordinates, and the
+/// host SDK's `pub_key_der_post_decode` hook reverses each half back to
+/// big-endian and assembles DER on the way in — but only when the dev
+/// handle is told the device is `Physical`. This test pins the
+/// end-to-end contract and is the regression guard for the iter-2 fix.
+#[test]
+fn get_establish_cred_encryption_key_round_trips_through_emulator() {
+    let ddi = DdiEmu::default();
+    let mut dev = ddi.open_dev(EMU_DEVICE_PATH).expect("open emu device");
+    // Firmware advertises Physical via `GetDeviceInfo` — match it so
+    // that `MborDecoder` runs the `post_decode_fn` hooks that convert
+    // the wire-format raw key into DER for the host SDK.
+    dev.set_device_kind(DdiDeviceKind::Physical);
+
+    let req = DdiGetEstablishCredEncryptionKeyCmdReq {
+        hdr: DdiReqHdr {
+            rev: Some(DdiApiRev { major: 1, minor: 0 }),
+            op: DdiOp::GetEstablishCredEncryptionKey,
+            sess_id: None,
+        },
+        data: DdiGetEstablishCredEncryptionKeyReq {},
+        ext: None,
+    };
+
+    let mut cookie = None;
+    let resp = dev
+        .exec_op(&req, &mut cookie)
+        .expect("GetEstablishCredEncryptionKey should succeed");
+
+    assert_eq!(resp.hdr.op, DdiOp::GetEstablishCredEncryptionKey);
+    assert_eq!(resp.data.nonce.len(), 32);
+
+    // The actual regression guard: parse the returned key as DER. This
+    // is the line that previously panicked with `EccKeyImportError`.
+    let _key = DeviceCredKey::new(&resp.data.pub_key, resp.data.nonce)
+        .expect("DeviceCredKey::new must accept the DER-converted public key");
 }
