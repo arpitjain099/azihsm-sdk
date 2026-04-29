@@ -120,4 +120,17 @@ impl HsmSessionManager for StdHsmPal {
         };
         entry.session_table.state(id)
     }
+
+    /// Return the 80-byte masking key portion of the session blob.
+    ///
+    /// Session blob layout: `[api_rev(8) || masking_key(80)]`.
+    fn session_masking_key(&self, pid: HsmPartId, id: HsmSessId) -> HsmResult<&[u8]> {
+        let entry = self.active_part(pid)?;
+        let physical_id = entry.session_table.physical_id(id)?;
+        let blob = entry.vault.key(physical_id)?;
+        if blob.len() < SESSION_API_REV_SIZE + SESSION_MASKING_KEY_SIZE {
+            return Err(HsmError::InternalError);
+        }
+        Ok(&blob[SESSION_API_REV_SIZE..SESSION_API_REV_SIZE + SESSION_MASKING_KEY_SIZE])
+    }
 }

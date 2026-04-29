@@ -158,4 +158,14 @@ pub trait HsmSessionManager {
     /// the session is active, requires re-negotiation, or has been
     /// deleted/invalidated.
     fn session_state(&self, pid: HsmPartId, id: HsmSessId) -> HsmSessionState;
+
+    /// Retrieve the 80-byte masking key stored with the session.
+    ///
+    /// The masking key is the AES-256 + HMAC-SHA-384 composite key
+    /// created during `OpenSession` and used to mask/unmask keys that
+    /// are session-scoped.
+    ///
+    /// # Errors
+    /// - [`HsmError::SessionNotFound`] — session ID is invalid.
+    fn session_masking_key(&self, pid: HsmPartId, id: HsmSessId) -> HsmResult<&[u8]>;
 }
