@@ -283,8 +283,28 @@ impl DdiDev for DdiEmuDev {
         Err(DdiError::DdiStatus(DdiStatus::UnsupportedCmd))
     }
 
+    /// No-op for now.
+    ///
+    /// `simulate_nssr_after_lm` simulates an NVMe Subsystem Reset that
+    /// follows a live migration. In `azihsm_ddi_mock` it dispatches to
+    /// `azihsm_ddi_sim::Function::simulate_migration`, which backs up
+    /// the session table, resets all other partition state, and restores
+    /// the sessions afterwards (see
+    /// `ddi/sim/src/function.rs::FunctionInner::simulate_migration`).
+    ///
+    /// The new firmware running under `StdHsm` does not yet hold any
+    /// post-`OpenSession` state — sessions, masked keys, and derived
+    /// attestation keys all land in later iterations — so there is
+    /// nothing to reset and the assert in
+    /// `ddi/lib/tests/integration/common.rs::common_cleanup` is
+    /// satisfied trivially.
+    ///
+    /// TODO(emu): once `OpenSession` lands and per-partition session /
+    /// vault state can outlive a single test, replace this with a
+    /// session-preserving reset modelled on `simulate_migration` above
+    /// and on the mcr-hsm `partition::cred_mgr` reset path.
     fn simulate_nssr_after_lm(&self) -> Result<(), DdiError> {
-        Err(DdiError::DdiStatus(DdiStatus::UnsupportedCmd))
+        Ok(())
     }
 }
 

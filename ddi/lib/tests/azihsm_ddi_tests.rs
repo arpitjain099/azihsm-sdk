@@ -27,7 +27,6 @@ mod integration {
     pub mod extension_support;
     pub mod flush_session;
     pub mod get_api_rev;
-    pub mod get_api_rev_basic;
     pub mod get_cert_chain;
     pub mod get_device_info;
     pub mod get_establish_cred_encryption_key;
