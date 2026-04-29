@@ -1232,13 +1232,14 @@ async fn get_establish_cred_encryption_key_verify_signature() {
     // 4. Hash the public key with SHA-384
     let digest = Hasher::hash_vec(&mut HashAlgo::sha384(), pub_key_raw).expect("sha384");
 
-    // 5. Verify signature: raw EC verify (digest, signature) with leaf key
-    let result = Verifier::verify(
-        &mut EccAlgo::default(),
-        &verifier_key,
-        &digest,
-        signature_raw,
-    );
+    // 5. Reverse the LE wire-format signature to BE for OpenSSL/EccAlgo.
+    let mut sig_be = signature_raw.to_vec();
+    let half = sig_be.len() / 2;
+    sig_be[..half].reverse();
+    sig_be[half..].reverse();
+
+    // 6. Verify signature: raw EC verify (digest, signature) with leaf key
+    let result = Verifier::verify(&mut EccAlgo::default(), &verifier_key, &digest, &sig_be);
     assert!(
         result.is_ok(),
         "signature verification failed: {:?}",

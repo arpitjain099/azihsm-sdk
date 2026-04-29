@@ -83,6 +83,12 @@ pub(crate) const SEALED_BK3_SIZE: usize = 512;
 /// 512 leaves comfortable headroom and matches [`SEALED_BK3_SIZE`].
 pub(crate) const MASKED_BK_BOOT_SIZE: usize = 512;
 
+/// Length of the user ID stored after `EstablishCredential`.
+pub(crate) const APP_ID_LEN: usize = 16;
+
+/// Length of the user PIN stored after `EstablishCredential`.
+pub(crate) const APP_PIN_LEN: usize = 16;
+
 /// A single partition's state and cryptographic material.
 ///
 /// Each partition entry holds all per-partition data in fixed-size
@@ -178,6 +184,17 @@ pub(crate) struct PartitionEntry {
     /// Length of valid data in [`masked_bk_boot`](Self::masked_bk_boot).
     /// `0` means "InitBk3 has not yet run for this partition".
     pub(crate) masked_bk_boot_len: u32,
+
+    /// User credential established by `EstablishCredential`.
+    pub(crate) app_user_id: [u8; APP_ID_LEN],
+    pub(crate) app_pin: [u8; APP_PIN_LEN],
+    /// Host's ephemeral ECC P-384 public key from `EstablishCredential`.
+    /// Stored as PKA-native `LE X || LE Y` (96 bytes) and reused by
+    /// `OpenSession` for the session-credential ECDH chain.
+    pub(crate) app_pub_key: [u8; P384_PUB_KEY_LEN],
+    /// `true` once `EstablishCredential` has stored a credential into
+    /// this partition. Cleared on `disable` and `free`.
+    pub(crate) app_credential_set: bool,
 }
 
 impl Default for PartitionEntry {
@@ -201,6 +218,10 @@ impl Default for PartitionEntry {
             sealed_bk3_len: 0,
             masked_bk_boot: [0u8; MASKED_BK_BOOT_SIZE],
             masked_bk_boot_len: 0,
+            app_user_id: [0u8; APP_ID_LEN],
+            app_pin: [0u8; APP_PIN_LEN],
+            app_pub_key: [0u8; P384_PUB_KEY_LEN],
+            app_credential_set: false,
         }
     }
 }
@@ -436,6 +457,39 @@ impl HsmPartitionManager for StdHsmPal {
         }
         entry.masked_bk_boot[..data.len()].copy_from_slice(data);
         entry.masked_bk_boot_len = data.len() as u32;
+        Ok(())
+    }
+
+    fn part_user_credential(
+        &self,
+        pid: HsmPartId,
+    ) -> HsmResult<(
+        &[u8; APP_ID_LEN],
+        &[u8; APP_PIN_LEN],
+        &[u8; P384_PUB_KEY_LEN],
+    )> {
+        let entry = self.active_part(pid)?;
+        if !entry.app_credential_set {
+            return Err(HsmError::InvalidAppCredentials);
+        }
+        Ok((&entry.app_user_id, &entry.app_pin, &entry.app_pub_key))
+    }
+
+    fn part_set_user_credential(
+        &self,
+        pid: HsmPartId,
+        id: &[u8; APP_ID_LEN],
+        pin: &[u8; APP_PIN_LEN],
+        pub_key: &[u8; P384_PUB_KEY_LEN],
+    ) -> HsmResult<()> {
+        let entry = self.active_part_mut(pid)?;
+        if entry.app_credential_set {
+            return Err(HsmError::VaultAppLimitReached);
+        }
+        entry.app_user_id = *id;
+        entry.app_pin = *pin;
+        entry.app_pub_key = *pub_key;
+        entry.app_credential_set = true;
         Ok(())
     }
 }
@@ -774,5 +828,14 @@ impl StdHsmPal {
         entry.nonce.fill(0);
         entry.vault.clear();
         entry.session_table = SessionTable::new();
+
+        // Clear any user credential. mcr-hsm semantics: per-partition
+        // credential is reset whenever the partition is disabled, since
+        // OpenSession can re-establish a fresh one. This does NOT touch
+        // sealed_bk3 / masked_bk_boot which survive disable/enable.
+        entry.app_user_id.fill(0);
+        entry.app_pin.fill(0);
+        entry.app_pub_key.fill(0);
+        entry.app_credential_set = false;
     }
 }

@@ -167,6 +167,13 @@ impl StdEcc {
                 let mut algo = EccAlgo::default();
                 algo.sign(&priv_key, &hash_owned, Some(&mut buf))
                     .map_err(|_| HsmError::EccSignFailed)?;
+                // OpenSSL emits BE r || BE s; reverse each half to
+                // PKA-native LE so the wire format matches what real
+                // hardware would produce (and what the host SDK's
+                // `ecc_signature_post_decode` expects on the way in).
+                let half = curve.point_size();
+                buf[..half].reverse();
+                buf[half..].reverse();
                 Ok::<_, HsmError>(buf)
             })
             .await?;
@@ -201,15 +208,23 @@ impl StdEcc {
     pub async fn ecc_verify(&self, pub_le_raw: &[u8], hash: &[u8], sig: &[u8]) -> HsmResult<bool> {
         let curve = curve_from_raw_pub_len(pub_le_raw.len())?;
         let coord_len = curve.point_size();
+        if sig.len() != coord_len * 2 {
+            return Err(HsmError::InvalidArg);
+        }
         let (x_be, y_be) = le_raw_to_be_coords(pub_le_raw, coord_len);
         let hash_owned = hash.to_vec();
-        let sig_owned = sig.to_vec();
+        // Wire format is PKA-native LE r || LE s; OpenSSL's verify
+        // expects BE r || BE s. Reverse each half before handing it
+        // to the worker.
+        let mut sig_be = sig.to_vec();
+        sig_be[..coord_len].reverse();
+        sig_be[coord_len..].reverse();
         self.pool
             .submit_with_result(async move {
                 let pub_key = EccPublicKey::from_coordinates(curve, &x_be, &y_be)
                     .map_err(|_| HsmError::InvalidArg)?;
                 let mut algo = EccAlgo::default();
-                algo.verify(&pub_key, &hash_owned, &sig_owned)
+                algo.verify(&pub_key, &hash_owned, &sig_be)
                     .map_err(|_| HsmError::EccVerifyFailed)
             })
             .await

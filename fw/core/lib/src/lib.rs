@@ -9,6 +9,7 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+mod credential;
 mod ddi;
 mod error;
 mod hsm;

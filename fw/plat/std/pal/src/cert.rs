@@ -343,7 +343,12 @@ impl StdHsmPal {
         })
     }
 
-    /// Hash TBS with SHA-384, then sign with ECC P-384. Returns (r, s).
+    /// Hash TBS with SHA-384, then sign with ECC P-384. Returns
+    /// `(r_be, s_be)` ready for X.509 DER encoding (big-endian).
+    ///
+    /// `pal.ecc_sign` returns PKA-native LE r || LE s (matching real
+    /// hardware and the host SDK's wire format); X.509 DER `INTEGER`
+    /// fields require big-endian, so we reverse each half.
     async fn hash_and_sign(
         &self,
         priv_der: &[u8],
@@ -357,8 +362,11 @@ impl StdHsmPal {
 
         let mut r = [0u8; P384_SIG_COMPONENT];
         let mut s = [0u8; P384_SIG_COMPONENT];
-        r.copy_from_slice(&sig[..48]);
-        s.copy_from_slice(&sig[48..96]);
+        // LE r → BE r
+        for i in 0..P384_SIG_COMPONENT {
+            r[i] = sig[P384_SIG_COMPONENT - 1 - i];
+            s[i] = sig[2 * P384_SIG_COMPONENT - 1 - i];
+        }
         Ok((r, s))
     }
 

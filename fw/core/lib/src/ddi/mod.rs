@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+pub(crate) mod establish_credential;
 pub(crate) mod get_api_rev;
 pub(crate) mod get_cert_chain_info;
 pub(crate) mod get_certificate;
@@ -16,6 +17,7 @@ use azihsm_fw_ddi::DdiEncoder;
 use azihsm_fw_ddi_mbor::*;
 use azihsm_fw_ddi_types::error::DdiErrResp;
 use azihsm_fw_ddi_types::*;
+pub(crate) use establish_credential::*;
 pub(crate) use get_api_rev::*;
 pub(crate) use get_cert_chain_info::*;
 pub(crate) use get_certificate::*;
@@ -57,6 +59,9 @@ pub(crate) async fn dispatch<P: HsmPal>(
         DdiOp::GetSealedBk3 => get_sealed_bk3(hdr, decoder, part_id, pal, fmem, smem)?,
         DdiOp::SetSealedBk3 => set_sealed_bk3(hdr, decoder, part_id, pal, fmem, smem)?,
         DdiOp::InitBk3 => init_bk3(hdr, decoder, part_id, pal, fmem, smem).await?,
+        DdiOp::EstablishCredential => {
+            establish_credential(hdr, decoder, part_id, pal, fmem, smem).await?
+        }
         _ => return Err(HsmError::UnsupportedCmd),
     };
     Ok(resp.len())

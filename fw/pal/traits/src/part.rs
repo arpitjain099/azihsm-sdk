@@ -197,4 +197,38 @@ pub trait HsmPartitionManager {
     ///   partition is not allocated, or `data` exceeds the
     ///   per-partition storage size.
     fn part_set_masked_bk_boot(&self, pid: HsmPartId, data: &[u8]) -> HsmResult<()>;
+
+    /// Borrow the user credential previously stored by
+    /// `EstablishCredential`.
+    ///
+    /// Returns `(user_id (16B), pin (16B), host_pub_key (96B PKA-native LE))`.
+    /// Used by `OpenSession` to authenticate session-credential
+    /// requests against the previously-established user.
+    ///
+    /// Cleared by `disable` / `free`.
+    ///
+    /// # Errors
+    /// - [`HsmError::InvalidAppCredentials`] — no credential has been
+    ///   established for this partition.
+    /// - [`HsmError::InvalidArg`] — `pid` is out of range or the
+    ///   partition is not allocated.
+    fn part_user_credential(&self, pid: HsmPartId) -> HsmResult<(&[u8; 16], &[u8; 16], &[u8; 96])>;
+
+    /// Store a freshly-decrypted user credential into partition state.
+    ///
+    /// Single-shot: subsequent calls fail with
+    /// [`HsmError::VaultAppLimitReached`] until the partition is
+    /// disabled (which clears the credential) or freed.
+    ///
+    /// # Errors
+    /// - [`HsmError::VaultAppLimitReached`] — credential already established.
+    /// - [`HsmError::InvalidArg`] — `pid` is out of range or the
+    ///   partition is not allocated.
+    fn part_set_user_credential(
+        &self,
+        pid: HsmPartId,
+        id: &[u8; 16],
+        pin: &[u8; 16],
+        pub_key: &[u8; 96],
+    ) -> HsmResult<()>;
 }
