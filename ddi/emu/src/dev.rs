@@ -299,6 +299,23 @@ impl DdiDev for DdiEmuDev {
     /// session-preserving reset modelled on `simulate_migration` above
     /// and on the mcr-hsm `partition::cred_mgr` reset path.
     fn simulate_nssr_after_lm(&self) -> Result<(), DdiError> {
+        // Reset partition state: disable then re-enable to regenerate
+        // internal keys (establish-cred, session-enc, nonce, wrapping
+        // key). This matches what real hardware does on NSSR and what
+        // the sim's `simulate_migration` achieves.
+        self.handle
+            .block_on(async {
+                self.hsm.part_disable(EMU_PID).await.map_err(|_| ())?;
+                self.hsm.part_enable(EMU_PID).await.map_err(|_| ())?;
+                Ok::<_, ()>(())
+            })
+            .map_err(|_| DdiError::DeviceNotReady)?;
+
+        // Clear local session state.
+        let mut session = self.session.lock();
+        session.session_id = None;
+        session.short_app_id = None;
+
         Ok(())
     }
 }
