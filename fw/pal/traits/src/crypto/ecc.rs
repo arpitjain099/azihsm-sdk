@@ -55,9 +55,22 @@ impl HsmEccCurve {
     /// Return the public key size in bytes (X + Y coordinates).
     ///
     /// Public keys are represented as the concatenation of the X and Y
-    /// coordinates, each of which is `priv_key_len()` bytes.
+    /// coordinates, each padded to 4-byte alignment to match PKA
+    /// hardware output.  For P-256 (32) and P-384 (48) the coordinate
+    /// sizes are already aligned; P-521 pads from 66 → 68 bytes per
+    /// coordinate.
     pub fn pub_key_len(&self) -> usize {
-        self.priv_key_len() * 2
+        self.pka_coord_len() * 2
+    }
+
+    /// Return the raw (unpadded) coordinate size in bytes.
+    fn raw_coord_len(&self) -> usize {
+        self.priv_key_len()
+    }
+
+    /// Return the PKA-native coordinate size (4-byte aligned).
+    fn pka_coord_len(&self) -> usize {
+        self.raw_coord_len().next_multiple_of(4)
     }
 
     /// Return the ECDSA signature size in bytes (R + S values).

@@ -118,19 +118,31 @@ impl StdEcc {
         }
 
         // ── Public key: PKA-native (little-endian) X ‖ Y ──────────
-        let coord_len = curve.point_size() * 2;
-        if pub_le_raw.len() < coord_len {
+        // OpenSSL emits big-endian coordinates at the raw size (66B for
+        // P-521). We reverse each to get LE, then zero-pad to the
+        // PKA-native 4-byte-aligned coordinate size (68B for P-521).
+        let raw_half = curve.point_size();
+        let pka_half = raw_half.next_multiple_of(4);
+        let pka_total = pka_half * 2;
+        if pub_le_raw.len() < pka_total {
             return Err(HsmError::EccInvalidKeyLength);
         }
-        let half = coord_len / 2;
-        let (x_buf, y_buf) = pub_le_raw[..coord_len].split_at_mut(half);
-        // OpenSSL emits big-endian; reverse each half in place to get
-        // PKA-native little-endian.
-        pub_key
-            .coord(Some((x_buf, y_buf)))
-            .map_err(|_| HsmError::EccGetCoordinatesError)?;
-        x_buf.reverse();
-        y_buf.reverse();
+        // Zero the full PKA output region first (handles padding).
+        pub_le_raw[..pka_total].fill(0);
+        {
+            // Extract raw BE coords into temporary buffers.
+            let mut x_be = [0u8; 68];
+            let mut y_be = [0u8; 68];
+            pub_key
+                .coord(Some((&mut x_be[..raw_half], &mut y_be[..raw_half])))
+                .map_err(|_| HsmError::EccGetCoordinatesError)?;
+            // Reverse to LE and write into the PKA-native slots.
+            for i in 0..raw_half {
+                pub_le_raw[i] = x_be[raw_half - 1 - i];
+                pub_le_raw[pka_half + i] = y_be[raw_half - 1 - i];
+            }
+            // Trailing pad bytes (pka_half - raw_half) are already zero.
+        }
 
         Ok(priv_len)
     }
@@ -299,7 +311,7 @@ fn curve_from_raw_pub_len(len: usize) -> HsmResult<EccCurve> {
     match len {
         64 => Ok(EccCurve::P256),
         96 => Ok(EccCurve::P384),
-        132 => Ok(EccCurve::P521),
+        136 => Ok(EccCurve::P521), // PKA-native: 68 * 2
         _ => Err(HsmError::InvalidArg),
     }
 }
@@ -307,12 +319,19 @@ fn curve_from_raw_pub_len(len: usize) -> HsmResult<EccCurve> {
 /// Reverse each coordinate half (LE → BE) so OpenSSL's
 /// big-endian-expecting APIs accept the result. Stateless helper used
 /// by `ecc_verify` and `ecdh_derive`.
-fn le_raw_to_be_coords(le: &[u8], coord_size: usize) -> (Vec<u8>, Vec<u8>) {
-    let mut be_x = vec![0u8; coord_size];
-    let mut be_y = vec![0u8; coord_size];
-    for i in 0..coord_size {
-        be_x[i] = le[coord_size - 1 - i];
-        be_y[i] = le[2 * coord_size - 1 - i];
+/// Convert PKA-native LE coordinates to BE for OpenSSL.
+///
+/// `le` is `[LE_X (pka_coord) ‖ LE_Y (pka_coord)]` where `pka_coord`
+/// is `raw_coord_size` rounded up to 4-byte alignment (same for
+/// P-256/P-384; 66→68 for P-521). Only the first `raw_size` bytes of
+/// each half carry data; trailing pad bytes are ignored.
+fn le_raw_to_be_coords(le: &[u8], raw_size: usize) -> (Vec<u8>, Vec<u8>) {
+    let pka_size = raw_size.next_multiple_of(4);
+    let mut be_x = vec![0u8; raw_size];
+    let mut be_y = vec![0u8; raw_size];
+    for i in 0..raw_size {
+        be_x[i] = le[raw_size - 1 - i];
+        be_y[i] = le[pka_size + raw_size - 1 - i];
     }
     (be_x, be_y)
 }
@@ -332,7 +351,8 @@ mod tests {
     /// `ecc_verify`, and `ecdh_derive`.
     async fn make_byte_keys(driver: &StdEcc, curve: EccCurve) -> (Vec<u8>, Vec<u8>) {
         let mut priv_der = vec![0u8; 256];
-        let mut pub_le = vec![0u8; curve.point_size() * 2];
+        let pka_coord = curve.point_size().next_multiple_of(4);
+        let mut pub_le = vec![0u8; pka_coord * 2];
         let priv_len = driver
             .gen_keypair(curve, Some(&mut priv_der), &mut pub_le)
             .await

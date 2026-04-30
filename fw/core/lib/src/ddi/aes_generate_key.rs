@@ -18,15 +18,15 @@ use crate::masked_key;
 
 // ── DdiTargetKeyMetadata bit-flag indices ─────────────────────────────
 // Mirrors `ddi/serde/types/src/metadata.rs`.
-const BIT_SESSION: usize = 0;
-const BIT_ENCRYPT: usize = 2;
-const BIT_DECRYPT: usize = 3;
-const BIT_SIGN: usize = 4;
-const BIT_VERIFY: usize = 5;
-const BIT_DERIVE: usize = 6;
-const BIT_UNWRAP: usize = 8;
+pub(crate) const BIT_SESSION: usize = 0;
+pub(crate) const BIT_ENCRYPT: usize = 2;
+pub(crate) const BIT_DECRYPT: usize = 3;
+pub(crate) const BIT_SIGN: usize = 4;
+pub(crate) const BIT_VERIFY: usize = 5;
+pub(crate) const BIT_DERIVE: usize = 6;
+pub(crate) const BIT_UNWRAP: usize = 8;
 
-fn meta_bit(blob: &[u8; 16], bit: usize) -> bool {
+pub(crate) fn meta_bit(blob: &[u8; 16], bit: usize) -> bool {
     let index = bit / 8;
     let shift = bit % 8;
     (blob[index] & (1 << shift)) != 0
