@@ -41,11 +41,15 @@ pub(crate) async fn open_session<'a, P: HsmPal>(
     let api_rev = hdr.rev.ok_or(HsmError::UnsupportedRevision)?;
 
     // ── 1. Nonce check ────────────────────────────────────────────────
+    // Read and refresh the nonce atomically (before any .await) to
+    // prevent concurrent OpenSession requests from passing the same
+    // nonce check.
     let mut stored_nonce = [0u8; NONCE_LEN];
     pal.part_nonce(part_id, Some(&mut stored_nonce))?;
     if body.encrypted_credential.nonce != stored_nonce {
         return Err(HsmError::NonceMismatch);
     }
+    pal.part_nonce_refresh(part_id)?;
 
     // ── 2. Decrypt (id, pin, seed) via session-enc key ────────────────
     let se_kid = pal.part_session_enc_key_id(part_id)?;
@@ -64,16 +68,13 @@ pub(crate) async fn open_session<'a, P: HsmPal>(
     )
     .await?;
 
-    // ── 3. Refresh nonce immediately after HMAC verification ──────────
-    pal.part_nonce_refresh(part_id)?;
-
-    // ── 4. Verify decrypted credentials match established ones ────────
+    // ── 3. Verify decrypted credentials match established ones ────────
     let (est_id, est_pin, _est_pub) = pal.part_user_credential(part_id)?;
     if dec_id != *est_id || dec_pin != *est_pin {
         return Err(HsmError::InvalidAppCredentials);
     }
 
-    // ── 5. Recover bk_partition from masked_bk_boot ───────────────────
+    // ── 4. Recover bk_partition from masked_bk_boot ───────────────────
     let masked_bk_boot_len = pal.part_masked_bk_boot(part_id, None)?;
     if masked_bk_boot_len > fmem.len() {
         return Err(HsmError::InternalError);
@@ -92,15 +93,15 @@ pub(crate) async fn open_session<'a, P: HsmPal>(
     )
     .await?;
 
-    // ── 6. Derive bk_session from (bk_partition, session_seed) ────────
+    // ── 5. Derive bk_session from (bk_partition, session_seed) ────────
     let mut bk_session = [0u8; BK_AES_CBC_256_HMAC384_SIZE_BYTES];
     lm_key_derive::bk_session_gen(pal, &session_seed, &bk_partition, &mut bk_session).await?;
 
-    // ── 7. Generate session masking key (mk_session) ──────────────────
+    // ── 6. Generate session masking key (mk_session) ──────────────────
     let mut mk_session = [0u8; BK_AES_CBC_256_HMAC384_SIZE_BYTES];
     lm_key_derive::mk_session_gen(pal, &mut mk_session).await?;
 
-    // ── 8. Encode mk_session into a BMK envelope using bk_session ─────
+    // ── 7. Encode mk_session into a BMK envelope using bk_session ─────
     //       The host receives this as `bmk_session` and may send it back
     //       in ReopenSession.
     let mut metadata_buf = [0u8; METADATA_BUF_LEN];
@@ -118,7 +119,7 @@ pub(crate) async fn open_session<'a, P: HsmPal>(
     )
     .await?;
 
-    // ── 9. Create session via PAL ─────────────────────────────────────
+    // ── 8. Create session via PAL ─────────────────────────────────────
     let mut api_rev_bytes = [0u8; 8];
     api_rev_bytes[..4].copy_from_slice(&api_rev.major.to_le_bytes());
     api_rev_bytes[4..].copy_from_slice(&api_rev.minor.to_le_bytes());
@@ -126,7 +127,7 @@ pub(crate) async fn open_session<'a, P: HsmPal>(
     let guard = pal.session_create(part_id, &api_rev_bytes, &mk_session, None)?;
     let sess_id = guard.dismiss();
 
-    // ── 10. Encode response ───────────────────────────────────────────
+    // ── 9. Encode response ───────────────────────────────────────────
     let resp_hdr = DdiRespHdr {
         rev: hdr.rev,
         op: DdiOp::OpenSession,

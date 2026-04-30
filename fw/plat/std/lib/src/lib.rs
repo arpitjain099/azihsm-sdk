@@ -114,6 +114,9 @@ async fn ipc_task(rx: async_channel::Receiver<PartCommand>) {
             PartCommand::Disable { pid, reply } => {
                 let _ = reply.send(pal.part_disable_internal(pid));
             }
+            PartCommand::ResetNssr { pid, reply } => {
+                let _ = reply.send(pal.part_reset_nssr_internal(pid).await);
+            }
         }
     }
 }
@@ -357,6 +360,22 @@ impl StdHsm {
     pub async fn part_disable(&self, pid: u8) -> HsmResult<()> {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let cmd = PartCommand::Disable {
+            pid,
+            reply: reply_tx,
+        };
+        self.ipc_tx.send(cmd).await.expect("Embassy thread stopped");
+        reply_rx.await.expect("partition command reply dropped")
+    }
+
+    /// Simulate NVMe Subsystem Reset after live migration.
+    ///
+    /// Clears sessions, credentials, and ephemeral crypto keys while
+    /// preserving the identity key, sealed BK3, and masked BK_BOOT.
+    /// Regenerates establish-cred, session-enc, nonce, and RSA
+    /// wrapping key.
+    pub async fn part_reset_nssr(&self, pid: u8) -> HsmResult<()> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let cmd = PartCommand::ResetNssr {
             pid,
             reply: reply_tx,
         };

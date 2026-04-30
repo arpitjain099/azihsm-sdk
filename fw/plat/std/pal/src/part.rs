@@ -311,6 +311,14 @@ pub enum PartCommand {
         pid: u8,
         reply: tokio::sync::oneshot::Sender<HsmResult<()>>,
     },
+
+    /// Simulate NVMe Subsystem Reset after live migration.
+    /// Clears ephemeral state and regenerates crypto keys while
+    /// preserving identity key, sealed BK3, and masked BK_BOOT.
+    ResetNssr {
+        pid: u8,
+        reply: tokio::sync::oneshot::Sender<HsmResult<()>>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -868,6 +876,140 @@ impl StdHsmPal {
         entry.res_mask = 0;
         entry.vault = KeyVault::new(0);
         entry.state = PartState::Unallocated;
+
+        Ok(())
+    }
+
+    /// Simulate an NVMe Subsystem Reset (NSSR) after live migration.
+    ///
+    /// Clears sessions, credentials, and ephemeral crypto keys while
+    /// preserving the partition's identity key, sealed BK3, masked
+    /// BK_BOOT, and identity blob.  Regenerates ephemeral keys
+    /// (establish-cred, session-enc, nonce, RSA wrapping key).
+    ///
+    /// The partition must be in `Enabled` state and remains `Enabled`.
+    pub async fn part_reset_nssr_internal(&self, pid: u8) -> HsmResult<()> {
+        let table = unsafe { &mut *self.part_table.get() };
+        let idx = pid as usize;
+        if idx >= NUM_PARTITIONS {
+            return Err(HsmError::InvalidArg);
+        }
+        if table.entries[idx].state != PartState::Enabled {
+            return Err(HsmError::InvalidArg);
+        }
+
+        let entry = &mut table.entries[idx];
+
+        // Identity key must exist.
+        let id_kid = entry.id_key_id.ok_or(HsmError::KeyNotFound)?;
+
+        // Clear ephemeral key IDs before vault wipe.
+        entry.establish_cred_key_id = None;
+        entry.establish_cred_pub_key.fill(0);
+        entry.session_enc_key_id = None;
+        entry.session_enc_pub_key.fill(0);
+        entry.unwrapping_key_id = None;
+        entry.unwrapping_pub_key.clear();
+
+        // Wipe all vault keys except the identity key.
+        entry.vault.clear_except(id_kid)?;
+
+        // Clear sessions, credentials, nonce.
+        entry.nonce.fill(0);
+        entry.session_table = SessionTable::new();
+        entry.app_user_id.fill(0);
+        entry.app_pin.fill(0);
+        entry.app_pub_key.fill(0);
+        entry.app_credential_set = false;
+
+        // Regenerate ephemeral keys — same logic as part_enable_internal.
+        let attrs = HsmVaultKeyAttrs::new()
+            .with_internal(true)
+            .with_local(true)
+            .with_derive(true);
+
+        // Establish-credential ECC-384 key pair.
+        let mut ec_pub = [0u8; P384_PUB_KEY_LEN];
+        let ec_kid = self
+            .create_internal_ecc384_key(
+                pid,
+                HsmVaultKeyKind::EstablishCred,
+                attrs,
+                HsmEccPct::KeyAgreement,
+                &mut ec_pub,
+            )
+            .await?;
+
+        let table = unsafe { &mut *self.part_table.get() };
+        let entry = &mut table.entries[idx];
+        entry.establish_cred_key_id = Some(ec_kid);
+        entry.establish_cred_pub_key = ec_pub;
+
+        // Session encryption ECC-384 key pair.
+        let mut se_pub = [0u8; P384_PUB_KEY_LEN];
+        let se_kid = self
+            .create_internal_ecc384_key(
+                pid,
+                HsmVaultKeyKind::SessionEncryption,
+                attrs,
+                HsmEccPct::KeyAgreement,
+                &mut se_pub,
+            )
+            .await?;
+
+        let table = unsafe { &mut *self.part_table.get() };
+        let entry = &mut table.entries[idx];
+        entry.session_enc_key_id = Some(se_kid);
+        entry.session_enc_pub_key = se_pub;
+
+        // Nonce.
+        if Rng::rand_bytes(&mut entry.nonce).is_err() {
+            return Err(HsmError::InternalError);
+        }
+
+        // RSA-2k unwrapping key pair.
+        let (rsa_priv, rsa_pub) = self.rsa.gen_keypair(2048).await?;
+        let table = unsafe { &mut *self.part_table.get() };
+        let entry = &mut table.entries[idx];
+
+        let priv_der_len = rsa_priv
+            .to_bytes(None)
+            .map_err(|_| HsmError::InternalError)?;
+        let mut priv_der = vec![0u8; priv_der_len];
+        rsa_priv
+            .to_bytes(Some(&mut priv_der))
+            .map_err(|_| HsmError::InternalError)?;
+
+        let n_len = rsa_pub.n(None).map_err(|_| HsmError::InternalError)?;
+        let mut n_be = vec![0u8; n_len];
+        rsa_pub
+            .n(Some(&mut n_be))
+            .map_err(|_| HsmError::InternalError)?;
+        let e_len = rsa_pub.e(None).map_err(|_| HsmError::InternalError)?;
+        let mut e_be = vec![0u8; e_len];
+        rsa_pub
+            .e(Some(&mut e_be))
+            .map_err(|_| HsmError::InternalError)?;
+        let mut e_4 = [0u8; 4];
+        let e_off = 4 - e_be.len().min(4);
+        e_4[e_off..].copy_from_slice(&e_be[..e_be.len().min(4)]);
+        let mut raw_le = vec![0u8; n_len + 4];
+        for i in 0..n_len {
+            raw_le[i] = n_be[n_len - 1 - i];
+        }
+        for i in 0..4 {
+            raw_le[n_len + i] = e_4[3 - i];
+        }
+
+        let rsa_attrs = HsmVaultKeyAttrs::new()
+            .with_unwrap(true)
+            .with_internal(true)
+            .with_local(true);
+        let rsa_kid = entry
+            .vault
+            .create(&priv_der, HsmVaultKeyKind::Rsa2kPrivate, None, rsa_attrs, &[])?;
+        entry.unwrapping_key_id = Some(rsa_kid);
+        entry.unwrapping_pub_key = raw_le;
 
         Ok(())
     }

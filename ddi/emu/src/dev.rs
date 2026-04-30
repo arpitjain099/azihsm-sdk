@@ -281,37 +281,30 @@ impl DdiDev for DdiEmuDev {
     /// No-op for now.
     ///
     /// `simulate_nssr_after_lm` simulates an NVMe Subsystem Reset that
-    /// follows a live migration. In `azihsm_ddi_mock` it dispatches to
-    /// `azihsm_ddi_sim::Function::simulate_migration`, which backs up
-    /// the session table, resets all other partition state, and restores
-    /// the sessions afterwards (see
-    /// `ddi/sim/src/function.rs::FunctionInner::simulate_migration`).
+    /// follows a live migration.
     ///
-    /// The new firmware running under `StdHsm` does not yet hold any
-    /// post-`OpenSession` state — sessions, masked keys, and derived
-    /// attestation keys all land in later iterations — so there is
-    /// nothing to reset and the assert in
-    /// `ddi/lib/tests/integration/common.rs::common_cleanup` is
-    /// satisfied trivially.
+    /// Performs a surgical reset via [`StdHsm::part_reset_nssr`]: clears
+    /// sessions, credentials, and ephemeral crypto keys (establish-cred,
+    /// session-enc, nonce, RSA wrapping key), then regenerates them.
+    /// Preserves the partition's identity key, sealed BK3, and masked
+    /// BK_BOOT across the reset.
     ///
-    /// TODO(emu): once `OpenSession` lands and per-partition session /
-    /// vault state can outlive a single test, replace this with a
-    /// session-preserving reset modelled on `simulate_migration` above
-    /// and on the mcr-hsm `partition::cred_mgr` reset path.
+    /// Also clears the local per-handle session bookkeeping so the host
+    /// side is consistent with the firmware's post-reset state.
     fn simulate_nssr_after_lm(&self) -> Result<(), DdiError> {
-        // Reset partition state: disable then re-enable to regenerate
-        // internal keys (establish-cred, session-enc, nonce, wrapping
-        // key). This matches what real hardware does on NSSR and what
-        // the sim's `simulate_migration` achieves.
+        // Perform a surgical NSSR reset: clear sessions, credentials,
+        // and ephemeral keys, then regenerate them — while preserving
+        // the partition's identity key, sealed BK3, and masked BK_BOOT.
         self.handle
             .block_on(async {
-                self.hsm.part_disable(EMU_PID).await.map_err(|_| ())?;
-                self.hsm.part_enable(EMU_PID).await.map_err(|_| ())?;
-                Ok::<_, ()>(())
+                self.hsm
+                    .part_reset_nssr(EMU_PID)
+                    .await
+                    .map_err(|_| ())
             })
             .map_err(|_| DdiError::DeviceNotReady)?;
 
-        // Clear local session state.
+        // Clear local session state on ALL open device handles.
         let mut session = self.session.lock();
         session.session_id = None;
         session.short_app_id = None;

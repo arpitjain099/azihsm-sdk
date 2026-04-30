@@ -273,6 +273,37 @@ impl KeyVault {
         }
     }
 
+    /// Clear all keys except the one identified by `keep`.
+    ///
+    /// Used by NSSR reset to preserve the partition identity key while
+    /// wiping everything else (ephemeral keys, app keys, sessions).
+    /// Returns `Err(KeyNotFound)` if `keep` does not exist in the vault.
+    pub fn clear_except(&mut self, keep: HsmKeyId) -> HsmResult<()> {
+        let (keep_table, keep_entry) = split_key_id(keep);
+        // Validate the key to keep actually exists.
+        let table = self.tables.get(keep_table).ok_or(HsmError::KeyNotFound)?;
+        if table
+            .entries
+            .get(keep_entry)
+            .and_then(|s| s.as_ref())
+            .is_none()
+        {
+            return Err(HsmError::KeyNotFound);
+        }
+
+        for (table_idx, table) in self.tables.iter_mut().enumerate() {
+            for (entry_idx, slot) in table.entries.iter_mut().enumerate() {
+                if table_idx == keep_table && entry_idx == keep_entry {
+                    continue;
+                }
+                if let Some(entry) = slot.take() {
+                    table.used_bytes -= entry.cost;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Retrieve the key material for a given key ID.
     pub fn key(&self, key_id: HsmKeyId) -> HsmResult<&[u8]> {
         let entry = self.get_entry(key_id)?;
