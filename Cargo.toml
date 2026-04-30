@@ -28,6 +28,9 @@ members = [
   "ddi/sim",
   "ddi/test_helpers",
   "ddi/win",
+  "plugins/ossl_engine/openssl-sys-engine",
+  "plugins/ossl_engine/openssl-engine",
+  "plugins/ossl_engine/engine",
   "plugins/ossl_prov",
   "plugins/ossl_prov/integration-tests/nginx",
   "plugins/ossl_prov/integration-tests/openssl-capi",
@@ -65,9 +68,12 @@ resiliency_macro = { path = "crates/resiliency_macro" }
 test_with_tracing = { path = "crates/test_with_tracing" }
 test_with_tracing_macro = { path = "crates/test_with_tracing/test_with_tracing_macro" }
 x509 = { path = "crates/x509" }
+openssl-engine = { path = "plugins/ossl_engine/openssl-engine" }
+openssl-sys-engine = { path = "plugins/ossl_engine/openssl-sys-engine" }
 
 # Public crates
 anyhow = "1.0"
+bindgen = "0.71"
 arbitrary = "1"
 asn1 = "0.23.0"
 bitfield = "0.19.1"
@@ -100,6 +106,7 @@ openssl = "0.10.68"
 openssl-sys = "0.9"
 p384 = "0.13.0"
 parking_lot = "0.12"
+pkg-config = "0.3"
 pastey = "0.2.1"
 pem-rfc7468 = "0.7.0"
 pkcs1 = "0.7.5"
