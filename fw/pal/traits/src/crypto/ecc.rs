@@ -76,9 +76,20 @@ impl HsmEccCurve {
     /// Return the ECDSA signature size in bytes (R + S values).
     ///
     /// ECDSA signatures are represented as the concatenation of the R and S
-    /// values, each of which is `priv_key_len()` bytes.
+    /// values, each of which is `priv_key_len()` bytes. Internal callers
+    /// use this raw size. The DDI wire format pads P-521 to
+    /// `pka_coord_len()` per component; see [`Self::pka_sig_len`].
     pub fn sig_len(&self) -> usize {
         self.priv_key_len() * 2
+    }
+
+    /// Return the PKA-native signature size on the DDI wire.
+    ///
+    /// For P-256/P-384 this equals [`sig_len`](Self::sig_len). For P-521,
+    /// each component is padded from 66 → 68 bytes (4-byte alignment),
+    /// giving 136 bytes total.
+    pub fn pka_sig_len(&self) -> usize {
+        self.pka_coord_len() * 2
     }
 
     /// Return the ECDH shared secret size in bytes.

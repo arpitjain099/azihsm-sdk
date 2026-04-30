@@ -149,44 +149,48 @@ impl StdEcc {
 
     /// Raw EC sign over a pre-computed hash digest.
     ///
-    /// Imports the private key from PKCS#8 DER (the format produced by
-    /// [`gen_keypair`](Self::gen_keypair)), dispatches the signing
-    /// operation to the worker pool, and writes the raw `r ∥ s`
-    /// signature into the caller-supplied `sig` buffer.
-    ///
-    /// # Parameters
-    /// - `curve` — The NIST curve hint. The actual curve is encoded in
-    ///   the DER key; this parameter is used only to validate the
-    ///   `sig` buffer size.
-    /// - `priv_der` — PKCS#8 DER private key.
-    /// - `hash` — Pre-computed hash digest (e.g., SHA-256 output).
-    /// - `sig` — Output buffer. Must be ≥ `2 * curve.point_size()`
-    ///   (64 / 96 / 132 bytes for P-256 / P-384 / P-521).
-    ///
-    /// # Errors
-    /// - [`HsmError::InvalidArg`] — DER import failed or `sig` is too small.
-    /// - [`HsmError::EccSignFailed`] — OpenSSL sign operation failed.
-    pub async fn ecc_sign(&self, priv_der: &[u8], hash: &[u8], sig: &mut [u8]) -> HsmResult<()> {
+    /// Matches real PKA hardware: accepts a **little-endian** digest
+    /// (the caller reverses SHA's BE output before calling) and
+    /// produces a **PKA-native LE** signature (`LE r ‖ LE s`), each
+    /// component padded to 4-byte alignment (68 bytes for P-521).
+    pub async fn ecc_sign(&self, priv_der: &[u8], hash_le: &[u8], sig: &mut [u8]) -> HsmResult<()> {
         let priv_owned = priv_der.to_vec();
-        let hash_owned = hash.to_vec();
+        let hash_le_owned = hash_le.to_vec();
         let bytes: Vec<u8> = self
             .pool
             .submit_with_result(async move {
                 let priv_key =
                     EccPrivateKey::from_bytes(&priv_owned).map_err(|_| HsmError::InvalidArg)?;
                 let curve = EccKeyOp::curve(&priv_key);
-                let mut buf = vec![0u8; curve.point_size() * 2];
+                let raw_half = curve.point_size();
+                let pka_half = raw_half.next_multiple_of(4);
+
+                // Convert LE digest → BE for OpenSSL, trimming pad zeros.
+                let mut hash_be = hash_le_owned;
+                hash_be.reverse();
+                let trim = hash_be
+                    .iter()
+                    .position(|&b| b != 0)
+                    .unwrap_or(hash_be.len());
+                let digest_be = if trim >= hash_be.len() {
+                    &[0u8] as &[u8]
+                } else {
+                    &hash_be[trim..]
+                };
+
+                let mut buf = vec![0u8; raw_half * 2];
                 let mut algo = EccAlgo::default();
-                algo.sign(&priv_key, &hash_owned, Some(&mut buf))
+                algo.sign(&priv_key, digest_be, Some(&mut buf))
                     .map_err(|_| HsmError::EccSignFailed)?;
-                // OpenSSL emits BE r || BE s; reverse each half to
-                // PKA-native LE so the wire format matches what real
-                // hardware would produce (and what the host SDK's
-                // `ecc_signature_post_decode` expects on the way in).
-                let half = curve.point_size();
-                buf[..half].reverse();
-                buf[half..].reverse();
-                Ok::<_, HsmError>(buf)
+
+                // OpenSSL emits BE r ‖ BE s. Build PKA-native LE output:
+                // reverse each component and place into pka-sized slots.
+                let mut pka_buf = vec![0u8; pka_half * 2];
+                for i in 0..raw_half {
+                    pka_buf[i] = buf[raw_half - 1 - i];
+                    pka_buf[pka_half + i] = buf[raw_half + raw_half - 1 - i];
+                }
+                Ok::<_, HsmError>(pka_buf)
             })
             .await?;
         if sig.len() < bytes.len() {
@@ -198,45 +202,45 @@ impl StdEcc {
 
     /// Raw EC verify a signature over a pre-computed hash digest.
     ///
-    /// Reconstructs the public key from PKA-native raw coordinates
-    /// (the same `LE X ‖ LE Y` byte order produced by
-    /// [`gen_keypair`](Self::gen_keypair)), dispatches the verify to
-    /// the worker pool, and returns whether the signature is valid.
-    ///
-    /// # Parameters
-    /// - `curve` — The NIST curve.
-    /// - `pub_le_raw` — Public key as little-endian X ‖ little-endian
-    ///   Y, exactly `2 * curve.point_size()` bytes.
-    /// - `hash` — Pre-computed hash digest.
-    /// - `sig` — Raw `r ∥ s` signature.
-    ///
-    /// # Returns
-    /// `true` if the signature is valid, `false` otherwise.
-    ///
-    /// # Errors
-    /// - [`HsmError::InvalidArg`] — public key reconstruction failed.
-    /// - [`HsmError::EccVerifyFailed`] — verify operation failed
-    ///   (distinct from a returned `false`, which means valid-but-mismatched).
-    pub async fn ecc_verify(&self, pub_le_raw: &[u8], hash: &[u8], sig: &[u8]) -> HsmResult<bool> {
+    /// Matches real PKA hardware: accepts **little-endian** hash,
+    /// PKA-native LE signature, and PKA-native LE public key.
+    pub async fn ecc_verify(
+        &self,
+        pub_le_raw: &[u8],
+        hash_le: &[u8],
+        sig_le: &[u8],
+    ) -> HsmResult<bool> {
         let curve = curve_from_raw_pub_len(pub_le_raw.len())?;
-        let coord_len = curve.point_size();
-        if sig.len() != coord_len * 2 {
+        let raw_coord = curve.point_size();
+        let pka_coord = raw_coord.next_multiple_of(4);
+        if sig_le.len() != pka_coord * 2 {
             return Err(HsmError::InvalidArg);
         }
-        let (x_be, y_be) = le_raw_to_be_coords(pub_le_raw, coord_len);
-        let hash_owned = hash.to_vec();
-        // Wire format is PKA-native LE r || LE s; OpenSSL's verify
-        // expects BE r || BE s. Reverse each half before handing it
-        // to the worker.
-        let mut sig_be = sig.to_vec();
-        sig_be[..coord_len].reverse();
-        sig_be[coord_len..].reverse();
+        let (x_be, y_be) = le_raw_to_be_coords(pub_le_raw, raw_coord);
+        // Convert LE digest → BE for OpenSSL.
+        let mut hash_be = hash_le.to_vec();
+        hash_be.reverse();
+        let trim = hash_be
+            .iter()
+            .position(|&b| b != 0)
+            .unwrap_or(hash_be.len());
+        let hash_trimmed = if trim >= hash_be.len() {
+            vec![0u8]
+        } else {
+            hash_be[trim..].to_vec()
+        };
+        // Convert PKA-native LE sig → raw BE sig for OpenSSL.
+        let mut sig_be = vec![0u8; raw_coord * 2];
+        for i in 0..raw_coord {
+            sig_be[i] = sig_le[raw_coord - 1 - i];
+            sig_be[raw_coord + i] = sig_le[pka_coord + raw_coord - 1 - i];
+        }
         self.pool
             .submit_with_result(async move {
                 let pub_key = EccPublicKey::from_coordinates(curve, &x_be, &y_be)
                     .map_err(|_| HsmError::InvalidArg)?;
                 let mut algo = EccAlgo::default();
-                algo.verify(&pub_key, &hash_owned, &sig_be)
+                algo.verify(&pub_key, &hash_trimmed, &sig_be)
                     .map_err(|_| HsmError::EccVerifyFailed)
             })
             .await
@@ -396,30 +400,42 @@ mod tests {
     async fn sign_verify_p256() {
         let driver = make_driver();
         let (priv_der, pub_le) = make_byte_keys(&driver, EccCurve::P256).await;
-        let hash = [0xABu8; 32];
+        let mut hash_le = [0xABu8; 32];
+        hash_le.reverse();
         let mut sig = vec![0u8; 64];
-        driver.ecc_sign(&priv_der, &hash, &mut sig).await.unwrap();
-        assert!(driver.ecc_verify(&pub_le, &hash, &sig).await.unwrap());
+        driver
+            .ecc_sign(&priv_der, &hash_le, &mut sig)
+            .await
+            .unwrap();
+        assert!(driver.ecc_verify(&pub_le, &hash_le, &sig).await.unwrap());
     }
 
     #[tokio::test]
     async fn sign_verify_p384() {
         let driver = make_driver();
         let (priv_der, pub_le) = make_byte_keys(&driver, EccCurve::P384).await;
-        let hash = [0xCDu8; 48];
+        let mut hash_le = [0xCDu8; 48];
+        hash_le.reverse();
         let mut sig = vec![0u8; 96];
-        driver.ecc_sign(&priv_der, &hash, &mut sig).await.unwrap();
-        assert!(driver.ecc_verify(&pub_le, &hash, &sig).await.unwrap());
+        driver
+            .ecc_sign(&priv_der, &hash_le, &mut sig)
+            .await
+            .unwrap();
+        assert!(driver.ecc_verify(&pub_le, &hash_le, &sig).await.unwrap());
     }
 
     #[tokio::test]
     async fn sign_verify_p521() {
         let driver = make_driver();
         let (priv_der, pub_le) = make_byte_keys(&driver, EccCurve::P521).await;
-        let hash = [0xEFu8; 64];
-        let mut sig = vec![0u8; 132];
-        driver.ecc_sign(&priv_der, &hash, &mut sig).await.unwrap();
-        assert!(driver.ecc_verify(&pub_le, &hash, &sig).await.unwrap());
+        let mut hash_le = [0xEFu8; 64];
+        hash_le.reverse();
+        let mut sig = vec![0u8; 136];
+        driver
+            .ecc_sign(&priv_der, &hash_le, &mut sig)
+            .await
+            .unwrap();
+        assert!(driver.ecc_verify(&pub_le, &hash_le, &sig).await.unwrap());
     }
 
     // ── Verify with wrong hash ──────────────────────────────────
@@ -458,7 +474,7 @@ mod tests {
     async fn verify_wrong_hash_p521() {
         let driver = make_driver();
         let (priv_der, pub_le) = make_byte_keys(&driver, EccCurve::P521).await;
-        let mut sig = vec![0u8; 132];
+        let mut sig = vec![0u8; 136];
         driver
             .ecc_sign(&priv_der, &[0xAAu8; 64], &mut sig)
             .await

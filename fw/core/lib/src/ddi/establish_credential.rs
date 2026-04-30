@@ -111,6 +111,8 @@ pub(crate) async fn establish_credential<'a, P: HsmPal>(
             &mut b[..SHA384_DIGEST_LEN],
         )
         .await?;
+        // ECC driver expects LE digest (matches real PKA hardware).
+        b[..SHA384_DIGEST_LEN].reverse();
     }
     if !pal
         .ecc_verify(
