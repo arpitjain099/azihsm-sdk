@@ -48,10 +48,15 @@
 //! to a PKA (Public Key Accelerator) engine via DMA.
 
 use azihsm_crypto::DecryptOp;
+use azihsm_crypto::Decrypter;
 use azihsm_crypto::EncryptOp;
+use azihsm_crypto::HashAlgo;
+use azihsm_crypto::ImportableKey;
 use azihsm_crypto::KeyGenerationOp;
 use azihsm_crypto::PrivateKey;
+use azihsm_crypto::RsaAesKeyWrap;
 use azihsm_crypto::RsaEncryptAlgo;
+use azihsm_crypto::RsaKeyOp;
 use azihsm_crypto::RsaPrivateKey;
 use azihsm_crypto::RsaPublicKey;
 use azihsm_fw_hsm_pal_traits::*;
@@ -184,6 +189,54 @@ impl StdRsa {
 
         y.copy_from_slice(&result);
         Ok(())
+    }
+
+    /// RSA-AES key unwrap (CKM_RSA_AES_KEY_WRAP).
+    ///
+    /// Delegates to `RsaAesKeyWrap` from the crypto crate.
+    pub async fn rsa_aes_unwrap(
+        &self,
+        priv_key_der: &[u8],
+        hash_algo: HsmHashAlgo,
+        wrapped_blob: &[u8],
+        out: Option<&mut [u8]>,
+    ) -> HsmResult<usize> {
+        let priv_owned = priv_key_der.to_vec();
+        let blob_owned = wrapped_blob.to_vec();
+        let hash = match hash_algo {
+            HsmHashAlgo::Sha256 => HashAlgo::sha256(),
+            HsmHashAlgo::Sha384 => HashAlgo::sha384(),
+            _ => return Err(HsmError::InvalidArg),
+        };
+
+        let result: Vec<u8> = self
+            .pool
+            .submit_with_result(async move {
+                let priv_key =
+                    RsaPrivateKey::from_bytes(&priv_owned).map_err(|e| HsmError::InvalidArg)?;
+                // Debug: extract pub key from priv key and check modulus
+                let pub_from_priv = priv_key.public_key().map_err(|_| HsmError::InternalError)?;
+                let n_len = pub_from_priv.n(None).unwrap_or(0);
+                let mut n_bytes = vec![0u8; n_len];
+                let _ = pub_from_priv.n(Some(&mut n_bytes));
+                let mut kw = RsaAesKeyWrap::new(hash, 32);
+                let len = Decrypter::decrypt(&mut kw, &priv_key, &blob_owned, None)
+                    .map_err(|e| HsmError::RsaDecryptFailed)?;
+                let mut buf = vec![0u8; len];
+                Decrypter::decrypt(&mut kw, &priv_key, &blob_owned, Some(&mut buf))
+                    .map_err(|_| HsmError::RsaDecryptFailed)?;
+                Ok::<_, HsmError>(buf)
+            })
+            .await?;
+
+        let len = result.len();
+        if let Some(out) = out {
+            if out.len() < len {
+                return Err(HsmError::InvalidArg);
+            }
+            out[..len].copy_from_slice(&result);
+        }
+        Ok(len)
     }
 }
 

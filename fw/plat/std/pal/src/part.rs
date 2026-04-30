@@ -195,6 +195,13 @@ pub(crate) struct PartitionEntry {
     /// `true` once `EstablishCredential` has stored a credential into
     /// this partition. Cleared on `disable` and `free`.
     pub(crate) app_credential_set: bool,
+
+    /// Vault key ID for the RSA-2k unwrapping key. Generated during
+    /// `part_enable`, used by `GetUnwrappingKey` and `RsaUnwrap`.
+    pub(crate) unwrapping_key_id: Option<HsmKeyId>,
+
+    /// DER-encoded RSA-2k public key for unwrapping (SPKI format).
+    unwrapping_pub_key: Vec<u8>,
 }
 
 impl Default for PartitionEntry {
@@ -222,6 +229,8 @@ impl Default for PartitionEntry {
             app_pin: [0u8; APP_PIN_LEN],
             app_pub_key: [0u8; P384_PUB_KEY_LEN],
             app_credential_set: false,
+            unwrapping_key_id: None,
+            unwrapping_pub_key: Vec::new(),
         }
     }
 }
@@ -492,6 +501,27 @@ impl HsmPartitionManager for StdHsmPal {
         entry.app_credential_set = true;
         Ok(())
     }
+
+    fn part_unwrapping_key_id(&self, pid: HsmPartId) -> HsmResult<HsmKeyId> {
+        self.enabled_part(u8::from(pid))?
+            .unwrapping_key_id
+            .ok_or(HsmError::KeyNotFound)
+    }
+
+    fn part_unwrapping_pub_key(&self, pid: HsmPartId, out: Option<&mut [u8]>) -> HsmResult<usize> {
+        let entry = self.enabled_part(u8::from(pid))?;
+        let der = &entry.unwrapping_pub_key;
+        if der.is_empty() {
+            return Err(HsmError::KeyNotFound);
+        }
+        if let Some(buf) = out {
+            if buf.len() < der.len() {
+                return Err(HsmError::InvalidArg);
+            }
+            buf[..der.len()].copy_from_slice(der);
+        }
+        Ok(der.len())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -710,6 +740,68 @@ impl StdHsmPal {
             return Err(HsmError::InternalError);
         }
 
+        // Generate RSA-2k unwrapping key pair.
+        let (rsa_priv, rsa_pub) = self.rsa.gen_keypair(2048).await.map_err(|e| {
+            Self::clear_enabled_state(entry);
+            e
+        })?;
+        let table = unsafe { &mut *self.part_table.get() };
+        let entry = &mut table.entries[idx];
+
+        let priv_der_len = rsa_priv
+            .to_bytes(None)
+            .map_err(|_| HsmError::InternalError)?;
+        let mut priv_der = vec![0u8; priv_der_len];
+        rsa_priv
+            .to_bytes(Some(&mut priv_der))
+            .map_err(|_| HsmError::InternalError)?;
+
+        // Extract raw LE pub key: N_LE (256 bytes) || E_LE (4 bytes)
+        // for the wire format expected by pub_key_der_post_decode.
+        let n_len = rsa_pub.n(None).map_err(|_| HsmError::InternalError)?;
+        let mut n_be = vec![0u8; n_len];
+        rsa_pub
+            .n(Some(&mut n_be))
+            .map_err(|_| HsmError::InternalError)?;
+        let e_len = rsa_pub.e(None).map_err(|_| HsmError::InternalError)?;
+        let mut e_be = vec![0u8; e_len];
+        rsa_pub
+            .e(Some(&mut e_be))
+            .map_err(|_| HsmError::InternalError)?;
+        // Pad e to 4 bytes (BE) then reverse.
+        let mut e_4 = [0u8; 4];
+        let e_off = 4 - e_be.len().min(4);
+        e_4[e_off..].copy_from_slice(&e_be[..e_be.len().min(4)]);
+        // Build raw LE: N_LE || E_LE.
+        let mut raw_le = vec![0u8; n_len + 4];
+        for i in 0..n_len {
+            raw_le[i] = n_be[n_len - 1 - i];
+        }
+        for i in 0..4 {
+            raw_le[n_len + i] = e_4[3 - i];
+        }
+
+        let rsa_attrs = HsmVaultKeyAttrs::new()
+            .with_unwrap(true)
+            .with_internal(true)
+            .with_local(true);
+        match entry.vault.create(
+            &priv_der,
+            HsmVaultKeyKind::Rsa2kPrivate,
+            None,
+            rsa_attrs,
+            &[],
+        ) {
+            Ok(kid) => {
+                entry.unwrapping_key_id = Some(kid);
+                entry.unwrapping_pub_key = raw_le;
+            }
+            Err(e) => {
+                Self::clear_enabled_state(entry);
+                return Err(e);
+            }
+        }
+
         entry.state = PartState::Enabled;
         Ok(())
     }
@@ -837,5 +929,11 @@ impl StdHsmPal {
         entry.app_pin.fill(0);
         entry.app_pub_key.fill(0);
         entry.app_credential_set = false;
+
+        // Unwrapping key is cleared on disable — regenerated on re-enable.
+        if let Some(kid) = entry.unwrapping_key_id.take() {
+            let _ = entry.vault.delete(kid);
+        }
+        entry.unwrapping_pub_key.clear();
     }
 }

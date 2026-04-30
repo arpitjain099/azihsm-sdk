@@ -28,7 +28,7 @@ pub struct DdiEstablishCredentialReq {
 
     /// Masked unwrapping key, if available
     #[ddi(id = 5)]
-    pub masked_unwrapping_key: MborByteArray<1024>,
+    pub masked_unwrapping_key: MborByteArray<2048>,
 
     /// TPM or Caller Partition ID endorsement
     #[ddi(id = 6)]

@@ -108,4 +108,42 @@ pub trait HsmRsa {
     /// Returns [`HsmError`] if the exponentiation fails (e.g., PKA
     /// engine error, invalid key).
     async fn mod_exp_pub(&self, key: &[u8], x: &[u8], y: &mut [u8]) -> Result<(), HsmError>;
+
+    /// RSA-AES key unwrap (CKM_RSA_AES_KEY_WRAP).
+    ///
+    /// Unwraps a blob of the form `RSA-OAEP(AES-KEK) || AES-KWP(target_key)`.
+    /// Returns the unwrapped target key bytes.
+    ///
+    /// # Parameters
+    /// - `priv_key_der` — PKCS#8 DER of the RSA unwrapping key.
+    /// - `hash_algo` — Hash algorithm for RSA-OAEP (e.g., SHA-256).
+    /// - `wrapped_blob` — The concatenated wrapped blob.
+    /// - `out` — Output buffer. Pass `None` to query size.
+    ///
+    /// # Returns
+    /// Number of unwrapped bytes written (or required).
+    async fn rsa_aes_unwrap(
+        &self,
+        priv_key_der: &[u8],
+        hash_algo: HsmHashAlgo,
+        wrapped_blob: &[u8],
+        out: Option<&mut [u8]>,
+    ) -> Result<usize, HsmError>;
+
+    /// Extract the SPKI DER-encoded public key from an RSA private key DER.
+    ///
+    /// # Parameters
+    /// - `priv_key_der` — PKCS#8 DER of the RSA private key.
+    /// - `out` — Output buffer. Pass `None` to query size.
+    ///
+    /// # Returns
+    /// Number of bytes written (or required).
+    fn rsa_extract_pub_key(
+        &self,
+        priv_key_der: &[u8],
+        out: Option<&mut [u8]>,
+    ) -> Result<usize, HsmError>;
+
+    /// Return the modulus size in bytes for an RSA private key.
+    fn rsa_key_size(&self, priv_key_der: &[u8]) -> Result<usize, HsmError>;
 }

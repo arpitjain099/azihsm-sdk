@@ -26,7 +26,7 @@ pub struct DdiGetUnwrappingKeyResp {
 
     /// Masked Key
     #[ddi(id = 3)]
-    pub masked_key: MborByteArray<1024>,
+    pub masked_key: MborByteArray<2048>,
 }
 
 ddi_op_req_resp!(DdiGetUnwrappingKey);

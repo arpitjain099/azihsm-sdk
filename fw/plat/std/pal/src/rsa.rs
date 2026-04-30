@@ -32,6 +32,8 @@
 
 use azihsm_crypto::ExportableKey;
 use azihsm_crypto::ImportableKey;
+use azihsm_crypto::PrivateKey;
+use azihsm_crypto::RsaKeyOp;
 use azihsm_crypto::RsaPrivateKey;
 use azihsm_crypto::RsaPublicKey;
 
@@ -116,5 +118,44 @@ impl HsmRsa for StdHsmPal {
     async fn mod_exp_pub(&self, key: &[u8], x: &[u8], y: &mut [u8]) -> Result<(), HsmError> {
         let pub_key = RsaPublicKey::from_bytes(key).map_err(|_| HsmError::InvalidArg)?;
         self.rsa.mod_exp_pub(&pub_key, x, y).await
+    }
+
+    async fn rsa_aes_unwrap(
+        &self,
+        priv_key_der: &[u8],
+        hash_algo: HsmHashAlgo,
+        wrapped_blob: &[u8],
+        out: Option<&mut [u8]>,
+    ) -> Result<usize, HsmError> {
+        self.rsa
+            .rsa_aes_unwrap(priv_key_der, hash_algo, wrapped_blob, out)
+            .await
+    }
+
+    fn rsa_extract_pub_key(
+        &self,
+        priv_key_der: &[u8],
+        out: Option<&mut [u8]>,
+    ) -> Result<usize, HsmError> {
+        let priv_key = RsaPrivateKey::from_bytes(priv_key_der).map_err(|_| HsmError::InvalidArg)?;
+        let pub_key = priv_key.public_key().map_err(|_| HsmError::InternalError)?;
+        let len = pub_key
+            .to_bytes(None)
+            .map_err(|_| HsmError::InternalError)?;
+        if let Some(buf) = out {
+            if buf.len() < len {
+                return Err(HsmError::InvalidArg);
+            }
+            pub_key
+                .to_bytes(Some(&mut buf[..len]))
+                .map_err(|_| HsmError::InternalError)?;
+        }
+        Ok(len)
+    }
+
+    fn rsa_key_size(&self, priv_key_der: &[u8]) -> Result<usize, HsmError> {
+        let priv_key = RsaPrivateKey::from_bytes(priv_key_der).map_err(|_| HsmError::InvalidArg)?;
+        // Modulus length = key size in bytes.
+        priv_key.n(None).map_err(|_| HsmError::InternalError)
     }
 }

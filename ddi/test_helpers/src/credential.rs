@@ -11,7 +11,7 @@ pub fn helper_establish_credential(
     pub_key: DdiDerPublicKey,
     masked_bk3: MborByteArray<1024>,
     bmk: MborByteArray<1024>,
-    masked_unwrapping_key: MborByteArray<1024>,
+    masked_unwrapping_key: MborByteArray<2048>,
     signed_pid: MborByteArray<1024>,
     pota_pub_key: DdiDerPublicKey,
 ) -> Result<DdiEstablishCredentialCmdResp, DdiError> {

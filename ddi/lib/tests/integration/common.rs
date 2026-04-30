@@ -382,7 +382,7 @@ pub fn helper_common_establish_credential_with_bmk(
     pin: [u8; 16],
     masked_bk3: MborByteArray<1024>,
     bmk: MborByteArray<1024>,
-    unwrapping_key: MborByteArray<1024>,
+    unwrapping_key: MborByteArray<2048>,
 ) -> MborByteArray<1024> {
     // Get establish credential encryption key
     let resp =
@@ -428,7 +428,7 @@ pub fn helper_common_establish_credential_with_bmk_no_unwrap(
     pin: [u8; 16],
     masked_bk3: MborByteArray<1024>,
     bmk: MborByteArray<1024>,
-    unwrapping_key: MborByteArray<1024>,
+    unwrapping_key: MborByteArray<2048>,
 ) -> Result<DdiEstablishCredentialCmdResp, DdiError> {
     // Get establish credential encryption key
     let resp =
@@ -814,7 +814,7 @@ pub fn ecc_gen_key_mcr(
 pub fn get_unwrapping_key(
     dev: &mut <DdiTest as Ddi>::Dev,
     sess_id: u16,
-) -> (u16, Vec<u8>, MborByteArray<1024>) {
+) -> (u16, Vec<u8>, MborByteArray<2048>) {
     // If key is not found, re-check for key once every 5 seconds for up to 30 minutes.
     let mut timeout_s = 30 * 60;
     let interval_s = 5;

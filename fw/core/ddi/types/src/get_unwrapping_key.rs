@@ -16,7 +16,7 @@ pub struct DdiGetUnwrappingKeyResp<'a> {
     pub key_id: u16,
     #[ddi(id = 2)]
     pub pub_key: DdiPublicKey<'a>,
-    #[ddi(id = 3, max_len = 1024)]
+    #[ddi(id = 3, max_len = 2048)]
     pub masked_key: &'a [u8],
 }
 

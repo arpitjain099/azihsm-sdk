@@ -231,4 +231,15 @@ pub trait HsmPartitionManager {
         pin: &[u8; 16],
         pub_key: &[u8; 96],
     ) -> HsmResult<()>;
+
+    /// Returns the vault key ID of the RSA-2k unwrapping key.
+    ///
+    /// Generated during `part_enable`. Used by `GetUnwrappingKey` and
+    /// `RsaUnwrap`.
+    fn part_unwrapping_key_id(&self, pid: HsmPartId) -> HsmResult<HsmKeyId>;
+
+    /// Returns the DER-encoded RSA public key for unwrapping.
+    ///
+    /// Pass `None` to query the size; pass `Some(buf)` to copy.
+    fn part_unwrapping_pub_key(&self, pid: HsmPartId, out: Option<&mut [u8]>) -> HsmResult<usize>;
 }

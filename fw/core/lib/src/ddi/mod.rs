@@ -16,9 +16,13 @@ pub(crate) mod get_device_info;
 pub(crate) mod get_establish_cred_encryption_key;
 pub(crate) mod get_sealed_bk3;
 pub(crate) mod get_session_encryption_key;
+pub(crate) mod get_unwrapping_key;
+pub(crate) mod hmac;
 pub(crate) mod init_bk3;
 pub(crate) mod key_derive;
 pub(crate) mod open_session;
+pub(crate) mod rsa_mod_exp;
+pub(crate) mod rsa_unwrap;
 pub(crate) mod set_sealed_bk3;
 pub(crate) mod sha_digest;
 
@@ -42,9 +46,13 @@ pub(crate) use get_device_info::*;
 pub(crate) use get_establish_cred_encryption_key::*;
 pub(crate) use get_sealed_bk3::*;
 pub(crate) use get_session_encryption_key::*;
+pub(crate) use get_unwrapping_key::*;
+pub(crate) use hmac::*;
 pub(crate) use init_bk3::*;
 pub(crate) use key_derive::*;
 pub(crate) use open_session::*;
+pub(crate) use rsa_mod_exp::*;
+pub(crate) use rsa_unwrap::*;
 pub(crate) use set_sealed_bk3::*;
 pub(crate) use sha_digest::*;
 
@@ -101,6 +109,12 @@ pub(crate) async fn dispatch<P: HsmPal>(
         DdiOp::KbkdfCounterHmacDerive => {
             kbkdf_counter_hmac_derive(hdr, decoder, part_id, pal, fmem, smem).await?
         }
+        DdiOp::Hmac => hmac_op(hdr, decoder, part_id, pal, fmem, smem).await?,
+        DdiOp::GetUnwrappingKey => {
+            get_unwrapping_key(hdr, decoder, part_id, pal, fmem, smem).await?
+        }
+        DdiOp::RsaModExp => rsa_mod_exp(hdr, decoder, part_id, pal, fmem, smem).await?,
+        DdiOp::RsaUnwrap => rsa_unwrap(hdr, decoder, part_id, pal, fmem, smem).await?,
         _ => return Err(HsmError::UnsupportedCmd),
     };
     Ok(resp.len())
