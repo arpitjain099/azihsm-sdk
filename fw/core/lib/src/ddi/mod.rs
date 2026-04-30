@@ -17,6 +17,7 @@ pub(crate) mod get_establish_cred_encryption_key;
 pub(crate) mod get_sealed_bk3;
 pub(crate) mod get_session_encryption_key;
 pub(crate) mod init_bk3;
+pub(crate) mod key_derive;
 pub(crate) mod open_session;
 pub(crate) mod set_sealed_bk3;
 pub(crate) mod sha_digest;
@@ -42,6 +43,7 @@ pub(crate) use get_establish_cred_encryption_key::*;
 pub(crate) use get_sealed_bk3::*;
 pub(crate) use get_session_encryption_key::*;
 pub(crate) use init_bk3::*;
+pub(crate) use key_derive::*;
 pub(crate) use open_session::*;
 pub(crate) use set_sealed_bk3::*;
 pub(crate) use sha_digest::*;
@@ -95,6 +97,10 @@ pub(crate) async fn dispatch<P: HsmPal>(
         }
         DdiOp::EccSign => ecc_sign(hdr, decoder, part_id, pal, fmem, smem).await?,
         DdiOp::EcdhKeyExchange => ecdh_key_exchange(hdr, decoder, part_id, pal, fmem, smem).await?,
+        DdiOp::HkdfDerive => hkdf_derive(hdr, decoder, part_id, pal, fmem, smem).await?,
+        DdiOp::KbkdfCounterHmacDerive => {
+            kbkdf_counter_hmac_derive(hdr, decoder, part_id, pal, fmem, smem).await?
+        }
         _ => return Err(HsmError::UnsupportedCmd),
     };
     Ok(resp.len())
