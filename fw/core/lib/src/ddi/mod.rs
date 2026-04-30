@@ -6,6 +6,7 @@ pub(crate) mod aes_generate_key;
 pub(crate) mod close_session;
 pub(crate) mod delete_key;
 pub(crate) mod ecc_generate_key_pair;
+pub(crate) mod ecc_sign;
 pub(crate) mod establish_credential;
 pub(crate) mod get_api_rev;
 pub(crate) mod get_cert_chain_info;
@@ -29,6 +30,7 @@ use azihsm_fw_ddi_types::*;
 pub(crate) use close_session::*;
 pub(crate) use delete_key::*;
 pub(crate) use ecc_generate_key_pair::*;
+pub(crate) use ecc_sign::*;
 pub(crate) use establish_credential::*;
 pub(crate) use get_api_rev::*;
 pub(crate) use get_cert_chain_info::*;
@@ -89,6 +91,7 @@ pub(crate) async fn dispatch<P: HsmPal>(
         DdiOp::EccGenerateKeyPair => {
             ecc_generate_key_pair(hdr, decoder, part_id, pal, fmem, smem).await?
         }
+        DdiOp::EccSign => ecc_sign(hdr, decoder, part_id, pal, fmem, smem).await?,
         _ => return Err(HsmError::UnsupportedCmd),
     };
     Ok(resp.len())
