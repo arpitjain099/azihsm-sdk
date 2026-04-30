@@ -4,6 +4,7 @@
 pub(crate) mod aes_encrypt_decrypt;
 pub(crate) mod aes_generate_key;
 pub(crate) mod close_session;
+pub(crate) mod delete_key;
 pub(crate) mod ecc_generate_key_pair;
 pub(crate) mod establish_credential;
 pub(crate) mod get_api_rev;
@@ -26,6 +27,7 @@ use azihsm_fw_ddi_mbor::*;
 use azihsm_fw_ddi_types::error::DdiErrResp;
 use azihsm_fw_ddi_types::*;
 pub(crate) use close_session::*;
+pub(crate) use delete_key::*;
 pub(crate) use ecc_generate_key_pair::*;
 pub(crate) use establish_credential::*;
 pub(crate) use get_api_rev::*;
@@ -79,6 +81,7 @@ pub(crate) async fn dispatch<P: HsmPal>(
         }
         DdiOp::OpenSession => open_session(hdr, decoder, part_id, pal, fmem, smem).await?,
         DdiOp::CloseSession => close_session(hdr, decoder, part_id, pal, fmem, smem)?,
+        DdiOp::DeleteKey => delete_key(hdr, decoder, part_id, pal, fmem, smem)?,
         DdiOp::AesGenerateKey => aes_generate_key(hdr, decoder, part_id, pal, fmem, smem).await?,
         DdiOp::AesEncryptDecrypt => {
             aes_encrypt_decrypt(hdr, decoder, part_id, pal, fmem, smem).await?
