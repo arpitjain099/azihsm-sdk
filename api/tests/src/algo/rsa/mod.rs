@@ -7,4 +7,5 @@ mod key_prop_tests;
 mod key_tests;
 mod sign_tests;
 
+mod nist_tests;
 use super::*;
