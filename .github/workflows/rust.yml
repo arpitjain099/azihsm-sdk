@@ -14,6 +14,8 @@ env:
   CACHE_KEY_ID: 84f8acac52412db91407ab9f85776987da17d42f
   OPENSSL_VERSION: "3.0.3"
   OPENSSL_INSTALL: target/openssl-3.0.3
+  OPENSSL_1_1_VERSION: "1.1.1w"
+  OPENSSL_1_1_INSTALL: target/openssl-1.1.1w
 
 jobs:
   build_ubuntu:
@@ -31,12 +33,14 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y pkg-config libbsd-dev
 
-    - name: Cache OpenSSL ${{ env.OPENSSL_VERSION }}
+    - name: Cache OpenSSL
       id: cache-openssl
       uses: actions/cache@v5
       with:
-        path: ${{ env.OPENSSL_INSTALL }}
-        key: openssl-${{ env.OPENSSL_VERSION }}-target-linux-x64
+        path: |
+          ${{ env.OPENSSL_INSTALL }}
+          ${{ env.OPENSSL_1_1_INSTALL }}
+        key: openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_1_1_VERSION }}-target-linux-x64
 
     - name: Restore Cargo cache
       id: cargo-cache
@@ -127,12 +131,14 @@ jobs:
         key: ${{ runner.os }}-cargo-${{ env.CACHE_KEY_ID }}
         fail-on-cache-miss: false
 
-    - name: Cache OpenSSL ${{ env.OPENSSL_VERSION }}
+    - name: Cache OpenSSL
       id: cache-openssl
       uses: actions/cache@v5
       with:
-        path: ${{ env.OPENSSL_INSTALL }}
-        key: openssl-${{ env.OPENSSL_VERSION }}-target-linux-x64
+        path: |
+          ${{ env.OPENSSL_INSTALL }}
+          ${{ env.OPENSSL_1_1_INSTALL }}
+        key: openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_1_1_VERSION }}-target-linux-x64
 
     - name: Setup (includes OpenSSL on cache miss)
       run: cargo xtask setup ${{ steps.cache-openssl.outputs.cache-hit == 'true' && '--skip-openssl' || '' }}
