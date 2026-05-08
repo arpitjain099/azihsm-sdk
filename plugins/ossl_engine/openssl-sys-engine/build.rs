@@ -3,23 +3,60 @@
 
 //! Build script for openssl-sys-engine.
 //!
-//! Discovers OpenSSL 1.1.x via pkg-config, verifies the version, and runs
-//! bindgen to generate Rust FFI bindings from `wrapper.h`.
+//! Discovers OpenSSL 1.1.x and runs bindgen to generate Rust FFI bindings
+//! from `wrapper.h`.
+//!
+//! Discovery order:
+//! 1. `PKG_CONFIG_PATH` (if set externally, use pkg-config as-is)
+//! 2. `target/openssl-1.1.1w/` (installed by `cargo xtask setup`)
 
 use std::env;
 use std::path::PathBuf;
 
-fn main() {
-    // Discover OpenSSL via pkg-config.
+const OPENSSL_1_1_VERSION: &str = "1.1.1w";
+
+fn target_dir() -> PathBuf {
+    match env::var_os("CARGO_TARGET_DIR") {
+        Some(dir) => PathBuf::from(dir),
+        None => {
+            let manifest_dir =
+                PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+            manifest_dir
+                .ancestors()
+                .find(|p| p.join("Cargo.lock").exists())
+                .expect("could not find workspace root")
+                .join("target")
+        }
+    }
+}
+
+struct OpensslPaths {
+    include: PathBuf,
+    lib: PathBuf,
+}
+
+/// Try to find the OpenSSL 1.1.x install from `cargo xtask setup`.
+fn find_xtask_openssl() -> Option<OpensslPaths> {
+    let dir = target_dir().join(format!("openssl-{OPENSSL_1_1_VERSION}"));
+    let include = dir.join("include");
+    let lib = dir.join("lib");
+    if include.is_dir() && lib.is_dir() {
+        Some(OpensslPaths { include, lib })
+    } else {
+        None
+    }
+}
+
+/// Fall back to pkg-config discovery.
+fn find_pkgconfig_openssl() -> OpensslPaths {
     let lib = pkg_config::Config::new()
         .atleast_version("1.1.0")
         .probe("libcrypto")
         .expect(
-            "Could not find libcrypto via pkg-config. \
-             Set PKG_CONFIG_PATH to an OpenSSL 1.1.x installation.",
+            "Could not find libcrypto. \
+             Run 'cargo xtask setup' or set PKG_CONFIG_PATH to an OpenSSL 1.1.x installation.",
         );
 
-    // Reject anything other than OpenSSL 1.x -- the engine targets 1.1.x only.
     let major: u32 = lib
         .version
         .split('.')
@@ -35,38 +72,41 @@ fn main() {
         );
     }
 
-    // Link directives (pkg-config emits these, but be explicit).
-    println!("cargo::rustc-link-lib=crypto");
-    for path in &lib.link_paths {
-        println!("cargo::rustc-link-search=native={}", path.display());
+    OpensslPaths {
+        include: lib.include_paths.into_iter().next().unwrap_or_default(),
+        lib: lib.link_paths.into_iter().next().unwrap_or_default(),
     }
+}
 
-    // Run bindgen.
-    let mut builder = bindgen::Builder::default()
+fn main() {
+    let paths = if env::var_os("PKG_CONFIG_PATH").is_some() {
+        find_pkgconfig_openssl()
+    } else {
+        find_xtask_openssl().unwrap_or_else(find_pkgconfig_openssl)
+    };
+
+    println!("cargo::rustc-link-lib=crypto");
+    println!("cargo::rustc-link-search=native={}", paths.lib.display());
+
+    let bindings = bindgen::Builder::default()
         .header("wrapper.h")
+        .clang_arg(format!("-I{}", paths.include.display()))
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
-        // ENGINE API
         .allowlist_function("ENGINE_.*")
-        // EVP (keys, ciphers, digests)
         .allowlist_function("EVP_.*")
-        // RSA method construction
         .allowlist_function("RSA_meth_.*")
         .allowlist_function("RSA_get_ex_data")
         .allowlist_function("RSA_set_ex_data")
         .allowlist_function("RSA_get_ex_new_index")
-        // EC method construction
         .allowlist_function("EC_KEY_METHOD_.*")
         .allowlist_function("EC_KEY_.*")
         .allowlist_function("EC_POINT_.*")
         .allowlist_function("EC_GROUP_.*")
-        // Error reporting
         .allowlist_function("ERR_put_error")
         .allowlist_function("ERR_add_error_data")
-        // Crypto utilities
         .allowlist_function("CRYPTO_get_ex_new_index")
         .allowlist_function("CRYPTO_set_mem_functions")
         .allowlist_function("OPENSSL_init_crypto")
-        // Types
         .allowlist_type("ENGINE")
         .allowlist_type("EVP_PKEY")
         .allowlist_type("EVP_PKEY_CTX")
@@ -81,7 +121,6 @@ fn main() {
         .allowlist_type("BIGNUM")
         .allowlist_type("dynamic_fns")
         .allowlist_type("dynamic_MEM_fns")
-        // Constants
         .allowlist_var("OSSL_DYNAMIC_.*")
         .allowlist_var("NID_.*")
         .allowlist_var("EVP_PKEY_.*")
@@ -92,14 +131,9 @@ fn main() {
         .allowlist_var("CRYPTO_EX_INDEX_EC_KEY")
         .allowlist_var("OPENSSL_INIT_NO_ATEXIT")
         .allowlist_var("ENGINE_CMD_FLAG_.*")
-        // Layout tests are fragile across minor OpenSSL versions.
-        .layout_tests(false);
-
-    for path in &lib.include_paths {
-        builder = builder.clang_arg(format!("-I{}", path.display()));
-    }
-
-    let bindings = builder.generate().expect("bindgen failed");
+        .layout_tests(false)
+        .generate()
+        .expect("bindgen failed");
 
     let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
     bindings
