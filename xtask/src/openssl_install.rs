@@ -4,7 +4,7 @@
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 
-//! Helper to resolve an OpenSSL installation, building one if necessary.
+//! Helper to resolve OpenSSL installations, building from source if necessary.
 
 #[cfg(target_os = "linux")]
 use std::path::PathBuf;
@@ -17,20 +17,34 @@ use xshell::cmd;
 use xshell::Shell;
 
 #[cfg(target_os = "linux")]
-const OPENSSL_VERSION: &str = "3.0.3";
+const OPENSSL_3_VERSION: &str = "3.0.3";
 #[cfg(target_os = "linux")]
-const OPENSSL_SHA256: &str = "ee0078adcef1de5f003c62c80cc96527721609c6f3bb42b7795df31f8b558c0b";
+const OPENSSL_3_SHA256: &str = "ee0078adcef1de5f003c62c80cc96527721609c6f3bb42b7795df31f8b558c0b";
+#[cfg(target_os = "linux")]
+const OPENSSL_3_URL_TAG: &str = "openssl-3.0.3";
 
 #[cfg(target_os = "linux")]
-fn default_install_dir() -> anyhow::Result<PathBuf> {
-    let target_dir = match std::env::var_os("CARGO_TARGET_DIR") {
-        Some(dir) => PathBuf::from(dir),
-        None => std::env::current_dir()?.join("target"),
-    };
-    Ok(target_dir.join(format!("openssl-{OPENSSL_VERSION}")))
+const OPENSSL_1_1_VERSION: &str = "1.1.1w";
+#[cfg(target_os = "linux")]
+const OPENSSL_1_1_SHA256: &str =
+    "cf3098950cb4d853ad95c0841f1f9c6d3dc102dccfcacd521d93925208b76ac8";
+#[cfg(target_os = "linux")]
+const OPENSSL_1_1_URL_TAG: &str = "OpenSSL_1_1_1w";
+
+#[cfg(target_os = "linux")]
+fn target_dir() -> anyhow::Result<PathBuf> {
+    match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(dir) => Ok(PathBuf::from(dir)),
+        None => Ok(std::env::current_dir()?.join("target")),
+    }
 }
 
-/// Checks whether an OpenSSL installation is available, without installing.
+#[cfg(target_os = "linux")]
+fn install_dir_for(version: &str) -> anyhow::Result<PathBuf> {
+    Ok(target_dir()?.join(format!("openssl-{version}")))
+}
+
+/// Checks whether the OpenSSL 3.x installation is available.
 #[cfg(target_os = "linux")]
 pub fn check_openssl() -> anyhow::Result<PathBuf> {
     match std::env::var("OPENSSL_DIR") {
@@ -50,10 +64,10 @@ pub fn check_openssl() -> anyhow::Result<PathBuf> {
         Err(_) => {}
     }
 
-    let install_dir = default_install_dir()?;
-    if install_dir.is_dir() {
-        log::info!("using cached OpenSSL at {}", install_dir.display());
-        return Ok(install_dir);
+    let dir = install_dir_for(OPENSSL_3_VERSION)?;
+    if dir.is_dir() {
+        log::info!("using cached OpenSSL at {}", dir.display());
+        return Ok(dir);
     }
 
     anyhow::bail!(
@@ -62,25 +76,22 @@ pub fn check_openssl() -> anyhow::Result<PathBuf> {
     );
 }
 
-/// Resolves an OpenSSL installation, building from source if necessary.
+/// Downloads, verifies, and builds an OpenSSL release from source.
 #[cfg(target_os = "linux")]
-pub fn ensure_openssl() -> anyhow::Result<PathBuf> {
-    // If OPENSSL_DIR is explicitly set, honour it strictly (never fall through to build).
-    if std::env::var("OPENSSL_DIR").is_ok() {
-        return check_openssl();
+fn build_openssl(
+    version: &str,
+    url_tag: &str,
+    sha256: &str,
+    configure_cmd: &str,
+) -> anyhow::Result<PathBuf> {
+    let install_dir = install_dir_for(version)?;
+    if install_dir.is_dir() {
+        log::info!("using cached OpenSSL {version} at {}", install_dir.display());
+        return Ok(install_dir);
     }
 
-    if let Ok(path) = check_openssl() {
-        return Ok(path);
-    }
+    log::info!("building OpenSSL {version} into {}", install_dir.display());
 
-    let install_dir = default_install_dir()?;
-    let prefix = install_dir.display();
-
-    // Download and build (mirrors CI exactly)
-    log::info!("OPENSSL_DIR not set — building OpenSSL {OPENSSL_VERSION} into {prefix}");
-
-    // Preflight: check required tools before starting a long build.
     let sh = Shell::new()?;
     for tool in ["curl", "sha256sum", "make", "cc", "perl"] {
         if cmd!(sh, "which {tool}").quiet().run().is_err() {
@@ -92,12 +103,12 @@ pub fn ensure_openssl() -> anyhow::Result<PathBuf> {
     }
 
     let url = format!(
-        "https://github.com/openssl/openssl/releases/download/openssl-{OPENSSL_VERSION}/openssl-{OPENSSL_VERSION}.tar.gz"
+        "https://github.com/openssl/openssl/releases/download/{url_tag}/openssl-{version}.tar.gz"
     );
-    let tarball = format!("/tmp/openssl-{OPENSSL_VERSION}.tar.gz");
-    let src_dir = format!("/tmp/openssl-{OPENSSL_VERSION}");
+    let tarball = format!("/tmp/openssl-{version}.tar.gz");
+    let src_dir = format!("/tmp/openssl-{version}");
 
-    log::info!("downloading OpenSSL {OPENSSL_VERSION}...");
+    log::info!("downloading OpenSSL {version}...");
     cmd!(sh, "curl -fsSL -o {tarball} {url}").run()?;
 
     let checksum_output = cmd!(sh, "sha256sum {tarball}").read()?;
@@ -106,21 +117,53 @@ pub fn ensure_openssl() -> anyhow::Result<PathBuf> {
         .next()
         .context("failed to parse sha256sum output")?;
     anyhow::ensure!(
-        actual_hash == OPENSSL_SHA256,
-        "SHA-256 mismatch for {tarball}: expected {OPENSSL_SHA256}, got {actual_hash}"
+        actual_hash == sha256,
+        "SHA-256 mismatch for {tarball}: expected {sha256}, got {actual_hash}"
     );
 
     cmd!(sh, "rm -rf {src_dir}").run()?;
     cmd!(sh, "tar xz -C /tmp -f {tarball}").run()?;
 
     sh.change_dir(&src_dir);
-    cmd!(sh, "./Configure --prefix={install_dir} --libdir=lib").run()?;
+    cmd!(sh, "{configure_cmd} --prefix={install_dir} --libdir=lib").run()?;
 
     let nproc = cmd!(sh, "nproc").read()?;
     let nproc = nproc.trim();
     cmd!(sh, "make -j{nproc}").run()?;
     cmd!(sh, "make install_sw").run()?;
 
-    log::info!("OpenSSL {OPENSSL_VERSION} installed to {prefix}");
+    log::info!("OpenSSL {version} installed to {}", install_dir.display());
     Ok(install_dir)
+}
+
+/// Resolves the OpenSSL 3.x installation, building from source if necessary.
+#[cfg(target_os = "linux")]
+pub fn ensure_openssl() -> anyhow::Result<PathBuf> {
+    if std::env::var("OPENSSL_DIR").is_ok() {
+        return check_openssl();
+    }
+
+    if let Ok(path) = check_openssl() {
+        return Ok(path);
+    }
+
+    build_openssl(
+        OPENSSL_3_VERSION,
+        OPENSSL_3_URL_TAG,
+        OPENSSL_3_SHA256,
+        "./Configure",
+    )
+}
+
+/// Resolves the OpenSSL 1.1.x installation, building from source if necessary.
+///
+/// Used by the OpenSSL ENGINE crates which target 1.1.x.
+#[cfg(target_os = "linux")]
+pub fn ensure_openssl_1_1() -> anyhow::Result<PathBuf> {
+    build_openssl(
+        OPENSSL_1_1_VERSION,
+        OPENSSL_1_1_URL_TAG,
+        OPENSSL_1_1_SHA256,
+        "./config",
+    )
 }

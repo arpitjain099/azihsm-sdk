@@ -170,6 +170,7 @@ impl Xtask for Setup {
         #[cfg(target_os = "linux")]
         if !self.skip_openssl {
             crate::openssl_install::ensure_openssl()?;
+            crate::openssl_install::ensure_openssl_1_1()?;
         }
 
         log::trace!("done setup");
