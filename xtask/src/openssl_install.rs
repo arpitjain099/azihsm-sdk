@@ -26,8 +26,7 @@ const OPENSSL_3_URL_TAG: &str = "openssl-3.0.3";
 #[cfg(target_os = "linux")]
 const OPENSSL_1_1_VERSION: &str = "1.1.1w";
 #[cfg(target_os = "linux")]
-const OPENSSL_1_1_SHA256: &str =
-    "cf3098950cb4d853ad95c0841f1f9c6d3dc102dccfcacd521d93925208b76ac8";
+const OPENSSL_1_1_SHA256: &str = "cf3098950cb4d853ad95c0841f1f9c6d3dc102dccfcacd521d93925208b76ac8";
 #[cfg(target_os = "linux")]
 const OPENSSL_1_1_URL_TAG: &str = "OpenSSL_1_1_1w";
 
@@ -86,7 +85,10 @@ fn build_openssl(
 ) -> anyhow::Result<PathBuf> {
     let install_dir = install_dir_for(version)?;
     if install_dir.is_dir() {
-        log::info!("using cached OpenSSL {version} at {}", install_dir.display());
+        log::info!(
+            "using cached OpenSSL {version} at {}",
+            install_dir.display()
+        );
         return Ok(install_dir);
     }
 

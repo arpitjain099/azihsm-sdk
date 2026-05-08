@@ -2,10 +2,10 @@
 # Licensed under the MIT License.
 
 [package]
-name = "openssl-sys-engine"
-version = "0.1.0"
 edition = "2024"
+name = "openssl-sys-engine"
 publish = false
+version = "0.1.0"
 
 [target.'cfg(target_os = "linux")'.build-dependencies]
 bindgen.workspace = true
