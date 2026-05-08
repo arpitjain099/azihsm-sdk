@@ -10,75 +10,74 @@
 //! 1. `PKG_CONFIG_PATH` (if set externally, use pkg-config as-is)
 //! 2. `target/openssl-1.1.1w/` (installed by `cargo xtask setup`)
 
-use std::env;
-use std::path::PathBuf;
+#[cfg(target_os = "linux")]
+fn main() {
+    use std::env;
+    use std::path::PathBuf;
 
-const OPENSSL_1_1_VERSION: &str = "1.1.1w";
+    const OPENSSL_1_1_VERSION: &str = "1.1.1w";
 
-fn target_dir() -> PathBuf {
-    match env::var_os("CARGO_TARGET_DIR") {
-        Some(dir) => PathBuf::from(dir),
-        None => {
-            let manifest_dir =
-                PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-            manifest_dir
-                .ancestors()
-                .find(|p| p.join("Cargo.lock").exists())
-                .expect("could not find workspace root")
-                .join("target")
+    struct OpensslPaths {
+        include: PathBuf,
+        lib: PathBuf,
+    }
+
+    fn target_dir() -> PathBuf {
+        match env::var_os("CARGO_TARGET_DIR") {
+            Some(dir) => PathBuf::from(dir),
+            None => {
+                let manifest_dir =
+                    PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+                manifest_dir
+                    .ancestors()
+                    .find(|p| p.join("Cargo.lock").exists())
+                    .expect("could not find workspace root")
+                    .join("target")
+            }
         }
     }
-}
 
-struct OpensslPaths {
-    include: PathBuf,
-    lib: PathBuf,
-}
-
-/// Try to find the OpenSSL 1.1.x install from `cargo xtask setup`.
-fn find_xtask_openssl() -> Option<OpensslPaths> {
-    let dir = target_dir().join(format!("openssl-{OPENSSL_1_1_VERSION}"));
-    let include = dir.join("include");
-    let lib = dir.join("lib");
-    if include.is_dir() && lib.is_dir() {
-        Some(OpensslPaths { include, lib })
-    } else {
-        None
-    }
-}
-
-/// Fall back to pkg-config discovery.
-fn find_pkgconfig_openssl() -> OpensslPaths {
-    let lib = pkg_config::Config::new()
-        .atleast_version("1.1.0")
-        .probe("libcrypto")
-        .expect(
-            "Could not find libcrypto. \
-             Run 'cargo xtask setup' or set PKG_CONFIG_PATH to an OpenSSL 1.1.x installation.",
-        );
-
-    let major: u32 = lib
-        .version
-        .split('.')
-        .next()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| panic!("Could not parse OpenSSL version: {}", lib.version));
-
-    if major != 1 {
-        panic!(
-            "Found OpenSSL {} but this engine requires 1.1.x. \
-             For OpenSSL 3.x, use the provider at plugins/ossl_prov instead.",
-            lib.version
-        );
+    fn find_xtask_openssl() -> Option<OpensslPaths> {
+        let dir = target_dir().join(format!("openssl-{OPENSSL_1_1_VERSION}"));
+        let include = dir.join("include");
+        let lib = dir.join("lib");
+        if include.is_dir() && lib.is_dir() {
+            Some(OpensslPaths { include, lib })
+        } else {
+            None
+        }
     }
 
-    OpensslPaths {
-        include: lib.include_paths.into_iter().next().unwrap_or_default(),
-        lib: lib.link_paths.into_iter().next().unwrap_or_default(),
-    }
-}
+    fn find_pkgconfig_openssl() -> OpensslPaths {
+        let lib = pkg_config::Config::new()
+            .atleast_version("1.1.0")
+            .probe("libcrypto")
+            .expect(
+                "Could not find libcrypto. \
+                 Run 'cargo xtask setup' or set PKG_CONFIG_PATH to an OpenSSL 1.1.x installation.",
+            );
 
-fn main() {
+        let major: u32 = lib
+            .version
+            .split('.')
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| panic!("Could not parse OpenSSL version: {}", lib.version));
+
+        if major != 1 {
+            panic!(
+                "Found OpenSSL {} but this engine requires 1.1.x. \
+                 For OpenSSL 3.x, use the provider at plugins/ossl_prov instead.",
+                lib.version
+            );
+        }
+
+        OpensslPaths {
+            include: lib.include_paths.into_iter().next().unwrap_or_default(),
+            lib: lib.link_paths.into_iter().next().unwrap_or_default(),
+        }
+    }
+
     let paths = if env::var_os("PKG_CONFIG_PATH").is_some() {
         find_pkgconfig_openssl()
     } else {
@@ -140,3 +139,6 @@ fn main() {
         .write_to_file(out.join("bindings.rs"))
         .expect("failed to write bindings.rs");
 }
+
+#[cfg(not(target_os = "linux"))]
+fn main() {}

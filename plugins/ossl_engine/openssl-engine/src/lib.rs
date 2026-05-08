@@ -9,8 +9,9 @@
 #![warn(clippy::arithmetic_side_effects)]
 
 //! Safe Rust abstractions for building OpenSSL 1.1.x engines.
-//! No HSM-specific logic.
+//! No HSM-specific logic. Linux only.
 
+#[cfg(target_os = "linux")]
 pub mod engine;
 
 pub use openssl_sys_engine as ffi;

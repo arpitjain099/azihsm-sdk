@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-[build-dependencies]
+[target.'cfg(target_os = "linux")'.build-dependencies]
 bindgen.workspace = true
 pkg-config.workspace = true
 
