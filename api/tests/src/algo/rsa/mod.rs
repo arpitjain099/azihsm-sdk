@@ -9,3 +9,5 @@ mod sign_tests;
 
 mod nist_tests;
 use super::*;
+
+pub mod common;
