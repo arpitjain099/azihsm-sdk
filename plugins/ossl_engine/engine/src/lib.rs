@@ -15,6 +15,7 @@ mod engine_impl {
     use std::ffi::CStr;
     use std::ffi::c_int;
     use std::ffi::c_ulong;
+    use std::ptr::NonNull;
 
     use openssl_engine::engine::Engine;
     use openssl_engine::ffi;
@@ -37,8 +38,15 @@ mod engine_impl {
     pub extern "C" fn bind_engine(
         engine_ptr: *mut ffi::ENGINE,
         id: *const std::ffi::c_char,
-        fns: *const ffi::dynamic_fns,
+        fns: *mut ffi::dynamic_fns,
     ) -> c_int {
+        let Some(engine_ptr) = NonNull::new(engine_ptr) else {
+            return 0;
+        };
+        let Some(fns) = NonNull::new(fns) else {
+            return 0;
+        };
+
         Engine::from_ptr(engine_ptr).bind(id, fns, bind_helper)
     }
 

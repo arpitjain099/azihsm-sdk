@@ -70,8 +70,6 @@ jobs:
         OPENSSL_DIR: ${{ github.workspace }}/${{ env.OPENSSL_3_INSTALL }}
       run: cargo xtask precheck --clippy
     - name: Build engine
-      env:
-        OPENSSL_DIR: ${{ github.workspace }}/${{ env.OPENSSL_3_INSTALL }}
       run: cargo build -p azihsm_engine -p openssl-engine -p openssl-sys-engine
     - name: Smoke test engine
       env:

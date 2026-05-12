@@ -6,6 +6,7 @@
 use std::ffi::CStr;
 use std::ffi::c_char;
 use std::ffi::c_int;
+use std::ptr::NonNull;
 use std::ptr::null_mut;
 
 use openssl_sys_engine as ffi;
@@ -14,7 +15,7 @@ pub struct Engine {
     ptr: *mut ffi::ENGINE,
 }
 
-// SAFETY: ENGINE is reference-counted and serialized by OpenSSL's internal locking.
+// SAFETY: ENGINE access is serialized by OpenSSL's CRYPTO_LOCK_ENGINE.
 #[allow(unsafe_code)]
 unsafe impl Send for Engine {}
 // SAFETY: Same as above.
@@ -22,9 +23,9 @@ unsafe impl Send for Engine {}
 unsafe impl Sync for Engine {}
 
 impl Engine {
-    pub fn from_ptr(ptr: *mut ffi::ENGINE) -> Self {
-        debug_assert!(!ptr.is_null());
-        Self { ptr }
+    /// Non-owning reference to an `ENGINE`. OpenSSL retains ownership.
+    pub fn from_ptr(ptr: NonNull<ffi::ENGINE>) -> Self {
+        Self { ptr: ptr.as_ptr() }
     }
 
     /// Synchronize memory allocators with the host, then call `f`.
@@ -33,26 +34,32 @@ impl Engine {
     pub fn bind(
         &self,
         id: *const c_char,
-        fns: *const ffi::dynamic_fns,
+        fns: NonNull<ffi::dynamic_fns>,
         f: fn(&Engine, &CStr) -> c_int,
     ) -> c_int {
-        // SAFETY: fns is provided by OpenSSL's dynamic loader. We sync
-        // allocators so engine and host share the same heap.
+        let fns_ptr = fns.as_ptr();
+
+        // SAFETY: fns is non-null (NonNull) and valid for this call (OpenSSL dynamic loader).
         unsafe {
-            if ffi::ENGINE_get_static_state() != (*fns).static_state {
-                ffi::CRYPTO_set_mem_functions(
-                    (*fns).mem_fns.malloc_fn,
-                    (*fns).mem_fns.realloc_fn,
-                    (*fns).mem_fns.free_fn,
-                );
-                ffi::OPENSSL_init_crypto(ffi::OPENSSL_INIT_NO_ATEXIT as u64, null_mut());
+            if ffi::ENGINE_get_static_state() != (*fns_ptr).static_state {
+                if ffi::CRYPTO_set_mem_functions(
+                    (*fns_ptr).mem_fns.malloc_fn,
+                    (*fns_ptr).mem_fns.realloc_fn,
+                    (*fns_ptr).mem_fns.free_fn,
+                ) != 1
+                {
+                    return 0;
+                }
+                if ffi::OPENSSL_init_crypto(ffi::OPENSSL_INIT_NO_ATEXIT as u64, null_mut()) != 1 {
+                    return 0;
+                }
             }
         }
 
         let id = if id.is_null() {
             c""
         } else {
-            // SAFETY: OpenSSL guarantees id is a valid C string.
+            // SAFETY: OpenSSL guarantees non-null id is a valid C string.
             unsafe { CStr::from_ptr(id) }
         };
 
@@ -61,13 +68,13 @@ impl Engine {
 
     #[allow(unsafe_code)]
     pub fn set_id(&self, id: &CStr) -> c_int {
-        // SAFETY: id is a valid CStr, self.ptr is a valid ENGINE.
+        // SAFETY: self.ptr is valid (from NonNull), id is a valid CStr.
         unsafe { ffi::ENGINE_set_id(self.ptr, id.as_ptr()) }
     }
 
     #[allow(unsafe_code)]
     pub fn set_name(&self, name: &CStr) -> c_int {
-        // SAFETY: name is a valid CStr, self.ptr is a valid ENGINE.
+        // SAFETY: self.ptr is valid (from NonNull), name is a valid CStr.
         unsafe { ffi::ENGINE_set_name(self.ptr, name.as_ptr()) }
     }
 }

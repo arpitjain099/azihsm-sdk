@@ -15,6 +15,8 @@ fn main() {
     use std::env;
     use std::path::PathBuf;
 
+    println!("cargo::rerun-if-changed=wrapper.h");
+
     const OPENSSL_1_1_VERSION: &str = "1.1.1w";
 
     struct OpensslPaths {
@@ -73,8 +75,16 @@ fn main() {
         }
 
         OpensslPaths {
-            include: lib.include_paths.into_iter().next().unwrap_or_default(),
-            lib: lib.link_paths.into_iter().next().unwrap_or_default(),
+            include: lib
+                .include_paths
+                .into_iter()
+                .next()
+                .expect("pkg-config returned no include paths for libcrypto"),
+            lib: lib
+                .link_paths
+                .into_iter()
+                .next()
+                .expect("pkg-config returned no link paths for libcrypto"),
         }
     }
 
