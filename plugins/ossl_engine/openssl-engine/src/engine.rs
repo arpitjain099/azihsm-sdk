@@ -23,15 +23,21 @@ unsafe impl Send for Engine {}
 unsafe impl Sync for Engine {}
 
 impl Engine {
-    /// Non-owning reference to an `ENGINE`. OpenSSL retains ownership.
-    pub fn from_ptr(ptr: NonNull<ffi::ENGINE>) -> Self {
+    /// # Safety
+    /// `ptr` must point to a valid `ENGINE` for the lifetime of the returned value.
+    #[allow(unsafe_code)]
+    pub unsafe fn from_ptr(ptr: NonNull<ffi::ENGINE>) -> Self {
         Self { ptr: ptr.as_ptr() }
     }
 
     /// Synchronize memory allocators with the host, then call `f`.
+    ///
+    /// # Safety
+    /// `fns` must point to a valid `dynamic_fns` for the duration of this call.
+    /// `id`, if non-null, must be a valid C string.
     #[allow(unsafe_code)]
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
-    pub fn bind(
+    pub unsafe fn bind(
         &self,
         id: *const c_char,
         fns: NonNull<ffi::dynamic_fns>,
@@ -39,7 +45,7 @@ impl Engine {
     ) -> c_int {
         let fns_ptr = fns.as_ptr();
 
-        // SAFETY: fns is non-null (NonNull) and valid for this call (OpenSSL dynamic loader).
+        // SAFETY: Caller guarantees fns points to a valid dynamic_fns.
         unsafe {
             if ffi::ENGINE_get_static_state() != (*fns_ptr).static_state {
                 if ffi::CRYPTO_set_mem_functions(

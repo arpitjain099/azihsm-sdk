@@ -47,7 +47,9 @@ mod engine_impl {
             return 0;
         };
 
-        Engine::from_ptr(engine_ptr).bind(id, fns, bind_helper)
+        // SAFETY: engine_ptr and fns are non-null (checked above) and valid
+        // for this call (provided by OpenSSL's dynamic loader).
+        unsafe { Engine::from_ptr(engine_ptr).bind(id, fns, bind_helper) }
     }
 
     fn bind_helper(engine: &Engine, id: &CStr) -> c_int {
