@@ -30,8 +30,10 @@ members = [
   "ddi/test_helpers",
   "ddi/win",
   "fw/core/crypto/aes-cbc-pad",
+  "fw/core/crypto/bk-derive",
   "fw/core/crypto/gcm-buf",
   "fw/core/crypto/hpke",
+  "fw/core/crypto/key-mask",
   "fw/core/ddi/mbor/api",
   "fw/core/ddi/mbor/codec",
   "fw/core/ddi/mbor/derive",
@@ -101,8 +103,10 @@ azihsm_fw_ddi_tbor_types = { path = "fw/core/ddi/tbor/types" }
 
 # Firmware crates — crypto
 azihsm_fw_core_crypto_aes_cbc_pad = { path = "fw/core/crypto/aes-cbc-pad" }
+azihsm_fw_core_crypto_bk_derive = { path = "fw/core/crypto/bk-derive" }
 azihsm_fw_core_crypto_gcm_buf = { path = "fw/core/crypto/gcm-buf" }
 azihsm_fw_core_crypto_hpke = { path = "fw/core/crypto/hpke" }
+azihsm_fw_core_crypto_key_mask = { path = "fw/core/crypto/key-mask" }
 
 # Firmware crates — common
 azihsm_fw_hsm_core = { path = "fw/core/lib" }

@@ -26,6 +26,8 @@
 //! - A 32-byte randomness nonce, refreshed per credential / session
 //!   event.
 //! - An optional sealed BK3 blob (set once, ≤ 1024 bytes).
+//! - An optional masked BK_BOOT blob (set once, written by `InitBk3`).
+//! - A platform-specific VM launch GUID binding used by `InitBk3`.
 //!
 //! ## Lifecycle
 //!
@@ -50,6 +52,12 @@
 //! shape uniform with the rest of the PAL.
 
 use super::*;
+
+/// Size of a single backup-key seed (BKS1 / BKS2) in bytes.
+pub const BK_SEED_SIZE: usize = 32;
+
+/// Size of the platform VM launch GUID in bytes.
+pub const VM_LAUNCH_GUID_SIZE: usize = 16;
 
 /// Opaque identity blob for a partition.
 ///
@@ -390,4 +398,111 @@ pub trait HsmPartitionManager {
     ///   already been stored.
     /// - `Err(HsmError::SealedBk3TooLarge)` — `data.len() > 1024`.
     fn part_set_sealed_bk3(&self, io: &impl HsmIo, data: &[u8]) -> HsmResult<()>;
+
+    /// Returns the masked BK_BOOT blob for the partition, optionally
+    /// copying it.
+    ///
+    /// The masked BK_BOOT is written exactly once by `InitBk3` via
+    /// [`part_set_masked_bk_boot`](Self::part_set_masked_bk_boot).
+    /// Before that, this method returns [`HsmError::KeyNotFound`].
+    ///
+    /// # Parameters
+    ///
+    /// - `io` — caller's I/O context.
+    /// - `out` — `None` for size query, `Some(buf)` to copy.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(size)` — bytes that were (or would be) written.
+    /// - `Err(HsmError::KeyNotFound)` — `InitBk3` has not yet stored
+    ///   the masked BK_BOOT.
+    /// - `Err(HsmError::InvalidArg)` — `io.pid()` is out of range, or
+    ///   `out = Some(buf)` and `buf.len() < size`.
+    fn part_masked_bk_boot(&self, io: &impl HsmIo, out: Option<&mut [u8]>) -> HsmResult<usize>;
+
+    /// Stores the masked BK_BOOT blob for the partition.
+    ///
+    /// Write-once: a second call returns
+    /// [`HsmError::Bk3AlreadyInitialized`].
+    ///
+    /// # Parameters
+    ///
+    /// - `io` — caller's I/O context.
+    /// - `data` — encoded masked BK_BOOT bytes.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())` on success.
+    /// - `Err(HsmError::InvalidArg)` — `io.pid()` is out of range, or
+    ///   `data` exceeds the implementation-defined storage size.
+    /// - `Err(HsmError::Bk3AlreadyInitialized)` — a masked BK_BOOT has
+    ///   already been stored.
+    fn part_set_masked_bk_boot(&self, io: &impl HsmIo, data: &[u8]) -> HsmResult<()>;
+
+    /// Returns the platform-specific VM launch GUID, optionally
+    /// copying it.
+    ///
+    /// Follows the standard query/copy pattern and always reports
+    /// [`VM_LAUNCH_GUID_SIZE`] bytes on success.
+    ///
+    /// # Parameters
+    ///
+    /// - `io` — caller's I/O context.
+    /// - `out` — `None` for size query, `Some(buf)` to copy.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(16)` always (on success), with `buf[..16]` populated when
+    ///   `out = Some(buf)`.
+    /// - `Err(HsmError::InvalidArg)` — `io.pid()` is out of range, or
+    ///   `out = Some(buf)` and `buf.len() < 16`.
+    fn part_vm_launch_guid(&self, io: &impl HsmIo, out: Option<&mut [u8]>) -> HsmResult<usize>;
+
+    /// Returns the firmware security version number used for masked-key
+    /// metadata.
+    fn current_svn(&self) -> u64;
+
+    /// Returns the current BKS2 index used for masked-key metadata and
+    /// BK_BOOT masking-key derivation.
+    fn current_bks2_index(&self) -> u16;
+
+    /// Returns the firmware seed used as the KBKDF key input for
+    /// BK_BOOT masking-key derivation.
+    fn fw_seed(&self) -> &[u8];
+
+    /// Derives a masking key with SP 800-108 Counter Mode KBKDF-SHA-384.
+    ///
+    /// The effective KDF context is `BKS1 || BKS2 || extra_context`,
+    /// where `svn` selects the PAL-internal BKS1 value and
+    /// `bks2_index` selects the PAL-internal BKS2 value. Neither seed
+    /// is exposed to the caller.
+    ///
+    /// # Parameters
+    ///
+    /// - `io` — caller's I/O context.
+    /// - `key` — KDK input to KBKDF.
+    /// - `label` — KBKDF label.
+    /// - `extra_context` — caller-supplied context suffix appended
+    ///   after `BKS1 || BKS2`.
+    /// - `svn` — selects which BKS1 value to use.
+    /// - `bks2_index` — selects which BKS2 value to use.
+    /// - `output` — destination buffer; `output.len()` bytes are
+    ///   derived.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())` — `output` filled.
+    /// - `Err(HsmError::NotEnoughSpace)` — PAL scratch allocation
+    ///   failed.
+    /// - `Err(HsmError)` — propagated from the underlying KBKDF.
+    async fn derive_masking_key(
+        &self,
+        io: &impl HsmIo,
+        key: &[u8],
+        label: &[u8],
+        extra_context: &[u8],
+        svn: u64,
+        bks2_index: u16,
+        output: &mut [u8],
+    ) -> HsmResult<()>;
 }

@@ -588,6 +588,7 @@ impl SessionCtrl {
             | DdiOp::GetCertChainInfo
             | DdiOp::GetCertificate
             | DdiOp::GetEstablishCredEncryptionKey
+            | DdiOp::InitBk3
             | DdiOp::GetSealedBk3
             | DdiOp::SetSealedBk3
             | DdiOp::ShaDigest => Self::NoSession,

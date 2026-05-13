@@ -64,6 +64,9 @@ const NONCE_LEN: usize = 32;
 /// Maximum size of the sealed BK3 blob in bytes.
 const SEALED_BK3_SIZE: usize = 512;
 
+/// Maximum size of the masked BK_BOOT blob in bytes.
+const MASKED_BK_BOOT_SIZE: usize = 512;
+
 /// Length of a partition's random identity blob in bytes.
 const PART_ID_LEN: usize = 16;
 
@@ -72,6 +75,18 @@ const P384_COORD_SIZE: usize = 48;
 
 /// Size of the raw public key (x ∥ y) in bytes.
 pub(crate) const P384_PUB_KEY_LEN: usize = P384_COORD_SIZE * 2;
+
+const BKS1: [u8; BK_SEED_SIZE] = [
+    0x9b, 0x4e, 0x4e, 0xb7, 0xad, 0xab, 0xdc, 0xd6, 0xb4, 0xd5, 0x07, 0xeb, 0x68, 0xeb, 0x26, 0x99,
+    0x2a, 0xbb, 0xca, 0xb5, 0x5c, 0xfb, 0x77, 0x3b, 0xc4, 0xd0, 0xa8, 0x8c, 0x21, 0x02, 0xb0, 0xac,
+];
+
+const BKS2: [u8; BK_SEED_SIZE] = [
+    0xad, 0x1a, 0x17, 0xe9, 0xed, 0x38, 0x27, 0x5e, 0x8b, 0x30, 0x5d, 0xb8, 0x19, 0x0f, 0x82, 0xb6,
+    0x2d, 0xa2, 0x5a, 0xc6, 0xf0, 0x70, 0xa3, 0xe1, 0x75, 0x9c, 0x61, 0x92, 0xcc, 0xf4, 0x19, 0xa3,
+];
+
+const FW_SEED: [u8; 48] = [0x42u8; 48];
 
 /// A single partition's state and cryptographic material.
 ///
@@ -165,6 +180,12 @@ pub(crate) struct PartitionEntry {
 
     /// Length of valid data in `sealed_bk3` (0 = not yet stored).
     sealed_bk3_len: u32,
+
+    /// Masked BK_BOOT blob — up to 512 bytes of opaque data.
+    masked_bk_boot: [u8; MASKED_BK_BOOT_SIZE],
+
+    /// Length of valid data in `masked_bk_boot` (0 = not yet stored).
+    masked_bk_boot_len: u32,
 }
 
 impl Default for PartitionEntry {
@@ -187,6 +208,8 @@ impl Default for PartitionEntry {
             nonce: [0u8; NONCE_LEN],
             sealed_bk3: [0u8; SEALED_BK3_SIZE],
             sealed_bk3_len: 0,
+            masked_bk_boot: [0u8; MASKED_BK_BOOT_SIZE],
+            masked_bk_boot_len: 0,
         }
     }
 }
@@ -393,6 +416,97 @@ impl HsmPartitionManager for StdHsmPal {
         entry.sealed_bk3[..data.len()].copy_from_slice(data);
         entry.sealed_bk3_len = data.len() as u32;
         Ok(())
+    }
+
+    fn part_masked_bk_boot(&self, io: &impl HsmIo, out: Option<&mut [u8]>) -> HsmResult<usize> {
+        let entry = self.active_part(io.pid())?;
+        let len = entry.masked_bk_boot_len as usize;
+        if len == 0 {
+            return Err(HsmError::KeyNotFound);
+        }
+        copy_out(&entry.masked_bk_boot[..len], out)
+    }
+
+    fn part_set_masked_bk_boot(&self, io: &impl HsmIo, data: &[u8]) -> HsmResult<()> {
+        let entry = self.active_part_mut(io.pid())?;
+        if entry.masked_bk_boot_len != 0 {
+            return Err(HsmError::Bk3AlreadyInitialized);
+        }
+        if data.len() > MASKED_BK_BOOT_SIZE {
+            return Err(HsmError::InvalidArg);
+        }
+        entry.masked_bk_boot[..data.len()].copy_from_slice(data);
+        entry.masked_bk_boot_len = data.len() as u32;
+        Ok(())
+    }
+
+    fn part_vm_launch_guid(&self, io: &impl HsmIo, out: Option<&mut [u8]>) -> HsmResult<usize> {
+        let _entry = self.active_part(io.pid())?;
+        copy_out(&[0u8; VM_LAUNCH_GUID_SIZE], out)
+    }
+
+    fn current_svn(&self) -> u64 {
+        0
+    }
+
+    fn current_bks2_index(&self) -> u16 {
+        0
+    }
+
+    fn fw_seed(&self) -> &[u8] {
+        &FW_SEED
+    }
+
+    async fn derive_masking_key(
+        &self,
+        io: &impl HsmIo,
+        key: &[u8],
+        label: &[u8],
+        extra_context: &[u8],
+        _svn: u64,
+        _bks2_index: u16,
+        output: &mut [u8],
+    ) -> HsmResult<()> {
+        self.alloc_scoped_async(io, async |a| {
+            let key_dma = a.dma_alloc(key.len())?;
+            key_dma.copy_from_slice(key);
+
+            let label_dma = a.dma_alloc(label.len())?;
+            label_dma.copy_from_slice(label);
+
+            let context_len = BKS1.len() + BKS2.len() + extra_context.len();
+            let context_dma = a.dma_alloc(context_len)?;
+            let mut pos = 0;
+            context_dma[pos..pos + BKS1.len()].copy_from_slice(&BKS1);
+            pos += BKS1.len();
+            context_dma[pos..pos + BKS2.len()].copy_from_slice(&BKS2);
+            pos += BKS2.len();
+            context_dma[pos..].copy_from_slice(extra_context);
+
+            let out_dma = a.dma_alloc(output.len())?;
+            let result = self
+                .sp800_108_kdf(
+                    io,
+                    HsmHashAlgo::Sha384,
+                    key_dma,
+                    label_dma,
+                    context_dma,
+                    out_dma,
+                )
+                .await;
+
+            if result.is_ok() {
+                output.copy_from_slice(out_dma);
+            }
+
+            key_dma.fill(0);
+            label_dma.fill(0);
+            context_dma.fill(0);
+            out_dma.fill(0);
+
+            result
+        })
+        .await
     }
 }
 
@@ -688,6 +802,8 @@ impl StdHsmPal {
         entry.id_pub_key.fill(0);
         entry.leaf_cert[..entry.leaf_cert_len].fill(0);
         entry.leaf_cert_len = 0;
+        entry.masked_bk_boot[..entry.masked_bk_boot_len as usize].fill(0);
+        entry.masked_bk_boot_len = 0;
 
         // Release resources.
         table.global_res_mask &= !entry.res_mask;
